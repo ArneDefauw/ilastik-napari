@@ -1,12 +1,13 @@
 from typing import Any
+import os
 
+import dask.array as da
+import joblib
+import loguru
 import numpy
 import sparse
-from PyQt5.QtGui import QStandardItemModel, QStandardItem
-from napari import Viewer
-from napari.components import LayerList
-from napari.layers import Image, Labels, Layer
-from napari.qt.threading import thread_worker
+from dask.distributed import Client
+from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -21,9 +22,86 @@ from qtpy.QtWidgets import (
 from sklearn.ensemble import RandomForestClassifier
 
 from ilastik.napari import filters
-from ilastik.napari.classifier import NDSparseClassifier
+from ilastik.napari.classifier import NDSparseClassifier, NDSparseDaskClassifier
 from ilastik.napari.filters import FilterSet
 from ilastik.napari.gui import CheckboxTableDialog, rc_pairs
+from napari import Viewer
+from napari.components import LayerList
+from napari.layers import Image, Labels, Layer
+from napari.qt.threading import thread_worker
+
+logger = loguru.logger
+
+
+def preprocessing_dask(image, estimators, preprocessing_path=None):
+    pass
+    # features=FilterSet( filters=[GaussianDask( scale=0.3 ),GaussianDask( scale=0.7 ) ] )
+    # estimators = [("features", features)]
+    # pipe = Pipeline(estimators)
+    # feature_map_lazy = pipe.transform(image)
+    # feature_map_lazy.to_zarr( preprocessing_path / "array.zarr" ) # this could be large
+
+
+def pixel_training_dask(
+    image, labels, preprocessing_path=None, model_path=None, **client_kwargs
+):
+    # WIP
+    # load features from the zarr store
+    X = da.from_zarr(preprocessing_path / "array.zarr")
+    clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
+    # add the classifier to the pipe, and then dump it
+    client = Client(**client_kwargs)
+    logger.log(f"Client dashboard link {client.dashboard_link}")
+
+    with joblib.parallel_backend(
+        "dask"
+    ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
+        clf.fit(X, labels)
+
+    if model_path is not None:
+        joblib.dump(clf, os.path.join(model_path))
+
+
+def pixel_classification_dask(
+    image: da.Array | None,
+    preprocessing_path,
+    model_path,
+    tmp_path,
+    **client_kwargs,
+):
+    # WIP
+    if image is None:
+        image = da.from_zarr(preprocessing_path / "array.zarr")
+    else:
+        # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
+        # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
+        preprocessing_pipe = joblib.load(preprocessing_path / "pipe.pkl")
+        image = preprocessing_pipe.transform(image)
+        # image could be large
+        image.to_zarr(tmp_path)
+        image.from_zarr(tmp_path)
+    clf = joblib.load(model_path)
+    client = Client(**client_kwargs)
+
+    clf_scatter = client.scatter(
+        clf
+    )  # scatter the model otherwise issues with large task graph
+
+    def _predict_clf(arr, model):
+        arr = model.predict(arr)
+        return arr.squeeze(-1)
+
+    array_result = da.map_blocks(
+        _predict_clf,
+        image,
+        dtype=image.dtype,
+        drop_axis=-1,
+        chunks=image.chunks[:-1],
+        model=clf_scatter,
+    )
+
+    results = array_result.compute()
+    return results
 
 
 @thread_worker
@@ -190,7 +268,9 @@ class PixelClassificationWidget(QWidget):
             )
         )
 
-        worker = _pixel_classification(image_layer.data, labels_layer.data, features)
+        worker = _pixel_classification(
+            image_layer.data.squeeze(), labels_layer.data.squeeze(), features
+        )
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
         worker.start()
