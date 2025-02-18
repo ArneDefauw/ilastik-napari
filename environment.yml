@@ -1,0 +1,8 @@
+name: ilastik_napari
+channels:
+  - ilastik-forge
+  - conda-forge
+dependencies:
+  - napari
+  - pyqt
+  - fastfilters
