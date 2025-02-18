@@ -3,6 +3,8 @@ from typing import Sequence
 
 import fastfilters
 import numpy
+import dask.array as da
+from dask_image.ndfilters import gaussian_filter
 from sklearn.base import BaseEstimator, TransformerMixin
 
 
@@ -40,6 +42,13 @@ class SingleFilter(Filter):
 class Gaussian(SingleFilter, order=0):
     def transform(self, X):
         return fastfilters.gaussianSmoothing(X, sigma=self.scale)
+
+
+class GaussianDask(SingleFilter, order=0):
+    def transform(self, X):
+        if not isinstance(X, da.Array):
+            X = da.asarray(X)
+        return gaussian_filter(X, sigma=self.scale)
 
 
 class DifferenceOfGaussians(SingleFilter, order=0):
