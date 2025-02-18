@@ -71,6 +71,7 @@ def pixel_classification_dask(
 ):
     # WIP
     if image is None:
+        # case where we train and run inference on same image
         image = da.from_zarr(preprocessing_path / "array.zarr")
     else:
         # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
@@ -91,6 +92,7 @@ def pixel_classification_dask(
         arr = model.predict(arr)
         return arr.squeeze(-1)
 
+    # probably need to use map_overlap instead of map_blocks here
     array_result = da.map_blocks(
         _predict_clf,
         image,
@@ -98,6 +100,7 @@ def pixel_classification_dask(
         drop_axis=-1,
         chunks=image.chunks[:-1],
         model=clf_scatter,
+        # TODO output dtype not correct, need to fix via meta
     )
 
     results = array_result.compute()
