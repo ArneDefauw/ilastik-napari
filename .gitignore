@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 
 notebooks/*
+
+!notebooks/dask_pipelines.ipynb
+
