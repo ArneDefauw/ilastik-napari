@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QLineEdit,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -32,95 +33,102 @@ from napari.layers import Image, Labels, Layer
 from napari.qt.threading import thread_worker
 
 logger = loguru.logger
+class Dask_model:
 
-FILE_PATH = os.path.dirname(__file__)
+    def __init__(self):
+        output_folder = os.path.join(os.path.dirname(__file__), "./output")
 
-PATH = os.path.join(FILE_PATH, "../../../../../output")
-
-def preprocessing_dask(image, estimators, preprocessing_path=None):
-    pipe = Pipeline(estimators)
-    feature_map_lazy = da.from_array(pipe.transform(image))
-    feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
-    joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
+        if not os.path.isdir(output_folder):
+            os.mkdir(output_folder)
 
 
-def pixel_training_dask(
-    X, labels, model_path=None, **client_kwargs
-):
-    # WIP
-    # load features from the zarr store
-    clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
-    # add the classifier to the pipe, and then dump it
+        self.output_file = os.path.join(os.path.dirname(__file__), "./output")
 
-    client = Client(**client_kwargs)
-
-    logger.info(f"Client dashboard link {client.dashboard_link}")
-
-    with joblib.parallel_backend(
-        "dask"
-    ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
-        clf.fit(X, labels)
-    if model_path is not None:
-        joblib.dump(clf, os.path.join(model_path))
+    def preprocessing_dask(self, image, estimators, preprocessing_path=None):
+        pipe = Pipeline(estimators)
+        feature_map_lazy = da.from_array(pipe.transform(image))
+        feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
+        joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
 
 
-def pixel_classification_dask(
-    image: da.Array | None,
-    preprocessing_path,
-    model_path,
-    tmp_path,
-    **client_kwargs,
-):
-    # WIP
-    if image is None:
-        # case where we train and run inference on same image
-        image = da.from_zarr(preprocessing_path, "array.zarr")
-    else:
-        # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
-        # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
-        preprocessing_pipe = joblib.load(preprocessing_path, "pipe.pkl")
-        image = preprocessing_pipe.transform(image)
-        # image could be large
-        image.to_zarr(tmp_path)
-        image.from_zarr(tmp_path)
-    clf = joblib.load(model_path)
-    client = Client(**client_kwargs)
+    def pixel_training_dask(
+        self, X, labels, model_path=None, **client_kwargs
+    ):
+        # WIP
+        # load features from the zarr store
+        clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
+        # add the classifier to the pipe, and then dump it
 
-    clf_scatter = client.scatter(
-        clf
-    )  # scatter the model otherwise issues with large task graph
+        client = Client(**client_kwargs)
 
-    def _predict_clf(arr, model):
-        arr = model.predict(arr)
-        return arr.squeeze(-1)
+        logger.info(f"Client dashboard link {client.dashboard_link}")
 
-    # probably need to use map_overlap instead of map_blocks here
-    array_result = da.map_blocks(
-        _predict_clf,
-        image,
-        dtype=image.dtype,
-        drop_axis=-1,
-        chunks=image.chunks[:-1],
-        model=clf_scatter,
-        # TODO output dtype not correct, need to fix via meta
-    )
+        with joblib.parallel_backend(
+            "dask"
+        ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
+            clf.fit(X, labels)
+        if model_path is not None:
+            joblib.dump(clf, os.path.join(model_path))
 
-    results = array_result.compute()
-    return results
 
-@thread_worker
-def _dask_workflow(image, labels, features):
-    data = da.from_array(image, chunks="auto")
-    estimators = [("features", features)]
-    preprocessing_dask(data, estimators=estimators, preprocessing_path=PATH)
+    def pixel_classification_dask(
+        self,
+        image: da.Array | None,
+        preprocessing_path,
+        model_path,
+        tmp_path,
+        **client_kwargs,
+    ):
+        # WIP
+        if image is None:
+            # case where we train and run inference on same image
+            image = da.from_zarr(preprocessing_path, "array.zarr")
+        else:
+            # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
+            # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
+            preprocessing_pipe = joblib.load(preprocessing_path, "pipe.pkl")
+            image = preprocessing_pipe.transform(image)
+            # image could be large
+            image.to_zarr(tmp_path)
+            image.from_zarr(tmp_path)
+        clf = joblib.load(model_path)
+        client = Client(**client_kwargs)
 
-    image =  da.from_zarr( os.path.join( PATH, "array.zarr" ))
+        clf_scatter = client.scatter(
+            clf
+        )  # scatter the model otherwise issues with large task graph
 
-    pixel_training_dask(X=image, labels=labels, model_path=os.path.join( PATH, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+        def _predict_clf(arr, model):
+            arr = model.predict(arr)
+            return arr.squeeze(-1)
 
-    results=pixel_classification_dask(image = None, preprocessing_path=PATH, model_path=os.path.join( PATH, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
+        # probably need to use map_overlap instead of map_blocks here
+        array_result = da.map_blocks(
+            _predict_clf,
+            image,
+            dtype=image.dtype,
+            drop_axis=-1,
+            chunks=image.chunks[:-1],
+            model=clf_scatter,
+            # TODO output dtype not correct, need to fix via meta
+        )
 
-    return numpy.moveaxis(results, -1, 0)
+        results = array_result.compute()
+        return results
+
+    @thread_worker
+    def _dask_workflow(self, image, labels, features):
+        data = da.from_array(image, chunks="auto")
+        estimators = [("features", features)]
+        self.preprocessing_dask(data, estimators=estimators, preprocessing_path=self.output_file)
+
+        image =  da.from_zarr( os.path.join( self.output_file, "array.zarr" ))
+
+        self.pixel_training_dask(X=image, labels=labels, model_path=os.path.join( self.output_file, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+
+        results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_file, model_path=os.path.join( self.output_file, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
+
+        return numpy.moveaxis(results, -1, 0)
 
 @thread_worker
 def _pixel_classification(image, labels, features):
@@ -199,6 +207,8 @@ class PixelClassificationWidget(QWidget):
     def __init__(self, napari_viewer: Viewer, parent=None):
         super().__init__(parent)
 
+        self.dask_model = Dask_model()
+
         layer_model = napari_viewer.layers
 
         image_combo = QComboBox()
@@ -246,11 +256,22 @@ class PixelClassificationWidget(QWidget):
         progress_bar.setMinimum(0)
         progress_bar.setMaximum(0)
 
+        output_file_group = QGroupBox("Output file")
+        self.folder_textbox = QLineEdit(self.dask_model.output_file)
+        folder_button = QPushButton("select file")
+        folder_button.clicked.connect(self._select_folder)
+        output_file_layout = QVBoxLayout()
+        output_file_layout.addWidget(self.folder_textbox)
+        output_file_layout.addWidget(folder_button)
+        output_file_group.setLayout(output_file_layout)
+
+
         layout = QFormLayout()
         layout.addRow("&Image:", image_combo)
         layout.addRow("&Labels:", labels_combo)
         layout.addRow(features_button)
         layout.addRow(output_type_group)
+        layout.addRow(output_file_group)
         layout.addRow(run_button)
         layout.addRow(progress_bar)
         self.setLayout(layout)
@@ -286,13 +307,20 @@ class PixelClassificationWidget(QWidget):
             )
         )
 
-        worker = _pixel_classification(
+        worker = self.dask_model._dask_workflow(
             image_layer.data.squeeze(), labels_layer.data.squeeze(), features
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
         worker.start()
+
+    def _select_folder(self):
+        folder = self.folder_textbox.text()
+
+        assert os.path.isdir(folder), "Directory does not exist"
+
+        self.dask_model.output_file = folder
 
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)
