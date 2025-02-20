@@ -6,7 +6,7 @@ import joblib
 import loguru
 import numpy
 import sparse
-from dask.distributed import Client
+from dask.distributed import Client, get_client
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
@@ -20,10 +20,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
 
 from ilastik.napari import filters
 from ilastik.napari.classifier import NDSparseClassifier, NDSparseDaskClassifier
-from ilastik.napari.filters import FilterSet
+from ilastik.napari.filters import FilterSet, GaussianDask
 from ilastik.napari.gui import CheckboxTableDialog, rc_pairs
 from napari import Viewer
 from napari.components import LayerList
@@ -32,32 +33,33 @@ from napari.qt.threading import thread_worker
 
 logger = loguru.logger
 
+FILE_PATH = os.path.dirname(__file__)
+
+PATH = os.path.join(FILE_PATH, "../../../../../output")
 
 def preprocessing_dask(image, estimators, preprocessing_path=None):
-    pass
-    # features=FilterSet( filters=[GaussianDask( scale=0.3 ),GaussianDask( scale=0.7 ) ] )
-    # estimators = [("features", features)]
-    # pipe = Pipeline(estimators)
-    # feature_map_lazy = pipe.transform(image)
-    # feature_map_lazy.to_zarr( preprocessing_path / "array.zarr" ) # this could be large
+    pipe = Pipeline(estimators)
+    feature_map_lazy = da.from_array(pipe.transform(image))
+    feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
+    joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
 
 
 def pixel_training_dask(
-    image, labels, preprocessing_path=None, model_path=None, **client_kwargs
+    X, labels, model_path=None, **client_kwargs
 ):
     # WIP
     # load features from the zarr store
-    X = da.from_zarr(preprocessing_path / "array.zarr")
     clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
     # add the classifier to the pipe, and then dump it
+
     client = Client(**client_kwargs)
-    logger.log(f"Client dashboard link {client.dashboard_link}")
+
+    logger.info(f"Client dashboard link {client.dashboard_link}")
 
     with joblib.parallel_backend(
         "dask"
     ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
         clf.fit(X, labels)
-
     if model_path is not None:
         joblib.dump(clf, os.path.join(model_path))
 
@@ -72,11 +74,11 @@ def pixel_classification_dask(
     # WIP
     if image is None:
         # case where we train and run inference on same image
-        image = da.from_zarr(preprocessing_path / "array.zarr")
+        image = da.from_zarr(preprocessing_path, "array.zarr")
     else:
         # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
         # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
-        preprocessing_pipe = joblib.load(preprocessing_path / "pipe.pkl")
+        preprocessing_pipe = joblib.load(preprocessing_path, "pipe.pkl")
         image = preprocessing_pipe.transform(image)
         # image could be large
         image.to_zarr(tmp_path)
@@ -106,6 +108,19 @@ def pixel_classification_dask(
     results = array_result.compute()
     return results
 
+@thread_worker
+def _dask_workflow(image, labels, features):
+    data = da.from_array(image, chunks="auto")
+    estimators = [("features", features)]
+    preprocessing_dask(data, estimators=estimators, preprocessing_path=PATH)
+
+    image =  da.from_zarr( os.path.join( PATH, "array.zarr" ))
+
+    pixel_training_dask(X=image, labels=labels, model_path=os.path.join( PATH, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+
+    results=pixel_classification_dask(image = None, preprocessing_path=PATH, model_path=os.path.join( PATH, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
+
+    return numpy.moveaxis(results, -1, 0)
 
 @thread_worker
 def _pixel_classification(image, labels, features):
@@ -274,6 +289,7 @@ class PixelClassificationWidget(QWidget):
         worker = _pixel_classification(
             image_layer.data.squeeze(), labels_layer.data.squeeze(), features
         )
+
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
         worker.start()

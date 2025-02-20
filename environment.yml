@@ -1,4 +1,4 @@
-name: ilastik_napari
+name: ilastik_napari_182
 channels:
   - ilastik-forge
   - conda-forge

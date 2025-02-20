@@ -5,7 +5,7 @@ import napari
 import debugpy
 
 # Enable debugpy and wait for debugger
-debugpy.listen(("localhost", 5678))
+debugpy.listen(("localhost", 5778))
 print("Waiting for debugger to attach...")
 debugpy.wait_for_client()  # Optional: only proceed once the debugger is attached
 
@@ -13,6 +13,6 @@ debugpy.wait_for_client()  # Optional: only proceed once the debugger is attache
 viewer = napari.Viewer()
 viewer.window.add_plugin_dock_widget("ilastik-napari")
 # sdata = read_zarr("/Users/arnedf/VIB/DATA/test_data_ilastik/sdata_transcriptomics.zarr")
-sdata = read_zarr("/Users/arnedf/VIB/DATA/test_data_ilastik/sdata_multi_channel.zarr")
+sdata = read_zarr(r"C:\Users\matti\Documents\WERK\STAGE\VIB\sdata_multi_channel.zarr\sdata_multi_channel.zarr")
 Interactive(sdata)
 napari.run()
