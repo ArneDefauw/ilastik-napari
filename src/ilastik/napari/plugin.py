@@ -103,7 +103,7 @@ class Dask_model:
             return arr.squeeze(-1)
 
         # probably need to use map_overlap instead of map_blocks here
-        array_result = da.map_blocks(
+        array_result = da.map_overlap(
             _predict_clf,
             image,
             dtype=image.dtype,
@@ -113,8 +113,7 @@ class Dask_model:
             # TODO output dtype not correct, need to fix via meta
         )
 
-        results = array_result.compute()
-        return results
+        return array_result
 
     @thread_worker
     def _dask_workflow(self, image, labels, features):
@@ -128,15 +127,22 @@ class Dask_model:
 
         results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_file, model_path=os.path.join( self.output_file, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
 
-        return numpy.moveaxis(results, -1, 0)
+        out = numpy.moveaxis(results, -1, 0)
+
+        return out
 
 @thread_worker
 def _pixel_classification(image, labels, features):
     feature_map = features.transform(numpy.asarray(image.data))
     sparse_labels = sparse.COO.from_numpy(numpy.asarray(labels.data))
+
     clf = NDSparseClassifier(RandomForestClassifier())
     clf.fit(feature_map, sparse_labels)
-    return numpy.moveaxis(clf.predict_proba(feature_map), -1, 0)
+    res = clf.predict_proba(feature_map)
+
+    out = numpy.moveaxis(res, -1, 0)
+
+    return out
 
 
 filter_names = {
@@ -333,7 +339,8 @@ class PixelClassificationWidget(QWidget):
             self._update_proba_layer(proba)
 
     def _update_seg_layer(self, proba):
-        data = numpy.argmax(proba, axis=0).astype(numpy.uint8) + 1
+        # data = numpy.argmax(proba, axis=0).astype(numpy.uint8) + 1
+        data = proba.astype(numpy.uint8)
         try:
             layer = self._viewer.layers[self.SEG_LAYER_PARAMS["name"]]
             layer.data = data
