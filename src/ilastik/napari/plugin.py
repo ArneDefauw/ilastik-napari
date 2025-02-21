@@ -6,7 +6,7 @@ import joblib
 import loguru
 import numpy
 import sparse
-from dask.distributed import Client, get_client
+from dask.distributed import Client
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
@@ -18,7 +18,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
-    QLineEdit,
+    QFileDialog,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -36,18 +36,13 @@ logger = loguru.logger
 class Dask_model:
 
     def __init__(self):
-        output_folder = os.path.join(os.path.dirname(__file__), "./output")
-
-        if not os.path.isdir(output_folder):
-            os.mkdir(output_folder)
-
-
-        self.output_file = os.path.join(os.path.dirname(__file__), "./output")
+        self.output_folder = None
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
         pipe = Pipeline(estimators)
-        feature_map_lazy = pipe.transform(image).rechunk('auto')
+        feature_map_lazy = pipe.transform(image).rechunk("auto")
         feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
+        joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
 
 
     def pixel_training_dask(
@@ -116,14 +111,16 @@ class Dask_model:
 
     @thread_worker
     def _dask_workflow(self, image, labels, features):
+        assert self.output_folder, "Output folder is None please pass a valid directory"
+
         estimators = [("features", features)]
-        self.preprocessing_dask(image, estimators=estimators, preprocessing_path=self.output_file)
+        self.preprocessing_dask(image, estimators=estimators, preprocessing_path=self.output_folder)
 
-        data =  da.from_zarr( os.path.join( self.output_file, "array.zarr" ))
+        data =  da.from_zarr( os.path.join( self.output_folder, "array.zarr" ))
 
-        self.pixel_training_dask(X=data, labels=labels, model_path=os.path.join( self.output_file, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+        self.pixel_training_dask(X=data, labels=labels, model_path=os.path.join( self.output_folder, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
 
-        results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_file, model_path=os.path.join( self.output_file, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
+        results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_folder, model_path=os.path.join( self.output_folder, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
 
         out = numpy.moveaxis(results, -1, 0)
 
@@ -260,12 +257,10 @@ class PixelClassificationWidget(QWidget):
         progress_bar.setMinimum(0)
         progress_bar.setMaximum(0)
 
-        output_file_group = QGroupBox("Output file")
-        self.folder_textbox = QLineEdit(self.dask_model.output_file)
-        folder_button = QPushButton("select file")
+        output_file_group = QGroupBox("Output folder")
+        folder_button = QPushButton("select folder")
         folder_button.clicked.connect(self._select_folder)
         output_file_layout = QVBoxLayout()
-        output_file_layout.addWidget(self.folder_textbox)
         output_file_layout.addWidget(folder_button)
         output_file_group.setLayout(output_file_layout)
 
@@ -320,11 +315,9 @@ class PixelClassificationWidget(QWidget):
         worker.start()
 
     def _select_folder(self):
-        folder = self.folder_textbox.text()
-
-        assert os.path.isdir(folder), "Directory does not exist"
-
-        self.dask_model.output_file = folder
+        folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
+        if folder_path:
+            self.dask_model.output_folder = folder_path
 
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)
