@@ -25,7 +25,7 @@ from sklearn.pipeline import Pipeline
 
 from ilastik.napari import filters
 from ilastik.napari.classifier import NDSparseClassifier, NDSparseDaskClassifier
-from ilastik.napari.filters import FilterSet, GaussianDask
+from ilastik.napari.filters import FilterSet
 from ilastik.napari.gui import CheckboxTableDialog, rc_pairs
 from napari import Viewer
 from napari.components import LayerList
@@ -46,9 +46,8 @@ class Dask_model:
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
         pipe = Pipeline(estimators)
-        feature_map_lazy = da.from_array(pipe.transform(image))
+        feature_map_lazy = pipe.transform(image).rechunk('auto')
         feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
-        joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
 
 
     def pixel_training_dask(
@@ -117,13 +116,12 @@ class Dask_model:
 
     @thread_worker
     def _dask_workflow(self, image, labels, features):
-        data = da.from_array(image, chunks="auto")
         estimators = [("features", features)]
-        self.preprocessing_dask(data, estimators=estimators, preprocessing_path=self.output_file)
+        self.preprocessing_dask(image, estimators=estimators, preprocessing_path=self.output_file)
 
-        image =  da.from_zarr( os.path.join( self.output_file, "array.zarr" ))
+        data =  da.from_zarr( os.path.join( self.output_file, "array.zarr" ))
 
-        self.pixel_training_dask(X=image, labels=labels, model_path=os.path.join( self.output_file, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+        self.pixel_training_dask(X=data, labels=labels, model_path=os.path.join( self.output_file, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
 
         results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_file, model_path=os.path.join( self.output_file, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
 
@@ -146,20 +144,20 @@ def _pixel_classification(image, labels, features):
 
 
 filter_names = {
-    filters.Gaussian: "Gaussian Smoothing",
-    filters.LaplacianOfGaussian: "Laplacian of Gaussian",
-    filters.GaussianGradientMagnitude: "Gaussian Gradient Magnitude",
-    filters.DifferenceOfGaussians: "Difference of Gaussians",
-    filters.StructureTensorEigenvalues: "Structure Tensor Eigenvalues",
-    filters.HessianOfGaussianEigenvalues: "Hessian of Gaussian Eigenvalues",
+    filters.GaussianDask: "Gaussian Smoothing",
+    filters.LaplacianOfGaussianDask: "Laplacian of Gaussian",
+    filters.GaussianGradientMagnitudeDask: "Gaussian Gradient Magnitude",
+    filters.DifferenceOfGaussiansDask: "Difference of Gaussians",
+    # filters.StructureTensorEigenvaluesDask: "Structure Tensor Eigenvalues",
+    # filters.HessianOfGaussianEigenvaluesDask: "Hessian of Gaussian Eigenvalues",
 }
 filter_list = (
-    filters.Gaussian,
-    filters.LaplacianOfGaussian,
-    filters.GaussianGradientMagnitude,
-    filters.DifferenceOfGaussians,
-    filters.StructureTensorEigenvalues,
-    filters.HessianOfGaussianEigenvalues,
+    filters.GaussianDask,
+    filters.LaplacianOfGaussianDask,
+    filters.GaussianGradientMagnitudeDask,
+    filters.DifferenceOfGaussiansDask,
+    # filters.StructureTensorEigenvaluesDask,
+    # filters.HessianOfGaussianEigenvaluesDask,
 )
 scale_list = (0.3, 0.7, 1.0, 1.6, 3.5, 5.0, 10.0)
 

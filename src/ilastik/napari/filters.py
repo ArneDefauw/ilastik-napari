@@ -4,9 +4,8 @@ from typing import Sequence
 import fastfilters
 import numpy
 import dask.array as da
-from dask_image.ndfilters import gaussian_filter
+from dask_image.ndfilters import gaussian_filter, gaussian_gradient_magnitude, gaussian_laplace
 from sklearn.base import BaseEstimator, TransformerMixin
-
 
 class Filter(BaseEstimator, TransformerMixin):
     def fit(self, X=None, y=None, **kwargs):
@@ -61,16 +60,41 @@ class DifferenceOfGaussians(SingleFilter, order=0):
         inner = fastfilters.gaussianSmoothing(X, sigma=self.inner_k * self.scale)
         return outer - inner
 
+class DifferenceOfGaussiansDask(SingleFilter, order=0):
+    def __init__(self, scale, *, inner_k=0.5):
+        super().__init__(scale)
+        self.inner_k = inner_k
+
+    def transform(self, X):
+        if not isinstance(X, da.Array):
+            X = da.asarray(X)
+
+        outer = gaussian_filter(X, sigma=self.scale)
+        inner = gaussian_filter(X, sigma=self.inner_k * self.scale)
+        return outer - inner
 
 class GaussianGradientMagnitude(SingleFilter, order=1):
     def transform(self, X):
         return fastfilters.gaussianGradientMagnitude(X, sigma=self.scale)
 
+class GaussianGradientMagnitudeDask(SingleFilter, order=1):
+    def transform(self, X):
+
+        if not isinstance(X, da.Array):
+            X = da.asarray(X)
+
+        return gaussian_gradient_magnitude(X, sigma=self.scale)
 
 class LaplacianOfGaussian(SingleFilter, order=2):
     def transform(self, X):
         return fastfilters.laplacianOfGaussian(X, scale=self.scale)
 
+
+class LaplacianOfGaussianDask(SingleFilter, order=2):
+    def transform(self, X):
+        if not isinstance(X, da.Array):
+            X = da.asarray(X)
+        return gaussian_laplace(X, sigma=self.scale)
 
 class StructureTensorEigenvalues(SingleFilter, order=1):
     def __init__(self, scale, *, inner_k=0.5):
@@ -82,11 +106,25 @@ class StructureTensorEigenvalues(SingleFilter, order=1):
             X, innerScale=self.inner_k * self.scale, outerScale=self.scale
         )
 
+class StructureTensorEigenvaluesDask(SingleFilter, order=1):
+    def __init__(self, scale, *, inner_k=0.5):
+        super().__init__(scale)
+        self.inner_k = inner_k
+
+    def transform(self, X):
+        # TODO: Vervang fastfilters met Dask filters
+        return fastfilters.structureTensorEigenvalues(
+            X, innerScale=self.inner_k * self.scale, outerScale=self.scale
+        )
 
 class HessianOfGaussianEigenvalues(SingleFilter, order=2):
     def transform(self, X):
         return fastfilters.hessianOfGaussianEigenvalues(X, scale=self.scale)
 
+class HessianOfGaussianEigenvaluesDask(SingleFilter, order=2):
+    def transform(self, X):
+        # TODO: Vervang fastfilters met Dask filters
+        return fastfilters.hessianOfGaussianEigenvalues(X, scale=self.scale)
 
 class FilterSet(Filter):
     def __init__(self, *, filters: Sequence[Filter]):
