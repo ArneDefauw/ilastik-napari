@@ -33,21 +33,21 @@ from napari.layers import Image, Labels, Layer
 from napari.qt.threading import thread_worker
 
 logger = loguru.logger
-class Dask_model:
 
-    def __init__(self):
-        self.output_folder = None
+
+class Dask_model:
+    def __init__(self, output_folder):
+        self.output_folder = output_folder
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
         pipe = Pipeline(estimators)
         feature_map_lazy = pipe.transform(image).rechunk("auto")
-        feature_map_lazy.to_zarr(preprocessing_path , "array.zarr", overwrite=True) # this could be large
-        joblib.dump(pipe, os.path.join( preprocessing_path, "preprocessing_pipe.pkl" ))
+        feature_map_lazy.to_zarr(
+            preprocessing_path, "array.zarr", overwrite=True
+        )  # this could be large
+        joblib.dump(pipe, os.path.join(preprocessing_path, "preprocessing_pipe.pkl"))
 
-
-    def pixel_training_dask(
-        self, X, labels, model_path=None, **client_kwargs
-    ):
+    def pixel_training_dask(self, X, labels, model_path=None, **client_kwargs):
         # WIP
         # load features from the zarr store
         clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
@@ -63,7 +63,6 @@ class Dask_model:
             clf.fit(X, labels)
         if model_path is not None:
             joblib.dump(clf, os.path.join(model_path))
-
 
     def pixel_classification_dask(
         self,
@@ -84,7 +83,7 @@ class Dask_model:
             image = preprocessing_pipe.transform(image)
             # image could be large
             image.to_zarr(tmp_path)
-            image.from_zarr(tmp_path)
+            image = image.from_zarr(tmp_path)
         clf = joblib.load(model_path)
         client = Client(**client_kwargs)
 
@@ -110,21 +109,43 @@ class Dask_model:
         return array_result
 
     @thread_worker
-    def _dask_workflow(self, image, labels, features):
-        assert self.output_folder, "Output folder is None please pass a valid directory"
+    def _dask_workflow(self, image, labels, features, to_train):
+        assert self.output_folder is not None, (
+            "Output folder is 'None' please pass a valid directory"
+        )
 
         estimators = [("features", features)]
-        self.preprocessing_dask(image, estimators=estimators, preprocessing_path=self.output_folder)
+        self.preprocessing_dask(
+            image, estimators=estimators, preprocessing_path=self.output_folder
+        )
 
-        data =  da.from_zarr( os.path.join( self.output_folder, "array.zarr" ))
+        data = da.from_zarr(os.path.join(self.output_folder, "array.zarr"))
 
-        self.pixel_training_dask(X=data, labels=labels, model_path=os.path.join( self.output_folder, "model.pkl" ), processes=False, n_workers=1, threads_per_worker=10)
+        if to_train:
+            self.pixel_training_dask(
+                X=data,
+                labels=labels,
+                model_path=os.path.join(self.output_folder, "model.pkl"),
+                processes=False,
+                n_workers=1,
+                threads_per_worker=10,
+            )
 
-        results=self.pixel_classification_dask(image = None, preprocessing_path=self.output_folder, model_path=os.path.join( self.output_folder, "model.pkl" ), tmp_path = None, processes=False,  n_workers=1, threads_per_worker=10)
+        # add assert
+        # os.path.join(self.output_folder, "model.pkl")
 
-        out = numpy.moveaxis(results, -1, 0)
+        results = self.pixel_classification_dask(
+            image=None,
+            preprocessing_path=self.output_folder,
+            model_path=os.path.join(self.output_folder, "model.pkl"),
+            tmp_path=None,
+            processes=False,
+            n_workers=1,
+            threads_per_worker=10,
+        )
 
-        return out
+        return results.transpose(1, 0)
+
 
 @thread_worker
 def _pixel_classification(image, labels, features):
@@ -208,7 +229,7 @@ class PixelClassificationWidget(QWidget):
     def __init__(self, napari_viewer: Viewer, parent=None):
         super().__init__(parent)
 
-        self.dask_model = Dask_model()
+        self.folder_path = None
 
         layer_model = napari_viewer.layers
 
@@ -259,11 +280,10 @@ class PixelClassificationWidget(QWidget):
 
         output_file_group = QGroupBox("Output folder")
         folder_button = QPushButton("select folder")
-        folder_button.clicked.connect(self._select_folder)
+        folder_button.clicked.connect(self._select_folder)  # TODO, box with path
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_group.setLayout(output_file_layout)
-
 
         layout = QFormLayout()
         layout.addRow("&Image:", image_combo)
@@ -306,8 +326,13 @@ class PixelClassificationWidget(QWidget):
             )
         )
 
-        worker = self.dask_model._dask_workflow(
-            image_layer.data.squeeze(), labels_layer.data.squeeze(), features
+        dask_model = Dask_model(output_folder=self.folder_path)
+
+        worker = dask_model._dask_workflow(
+            image_layer.data.squeeze(),  # image_layer.data (22,512,512) -> (512,512)
+            labels_layer.data.squeeze(),
+            features,
+            True,  # TODO, checkbox, train/inference
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -316,8 +341,8 @@ class PixelClassificationWidget(QWidget):
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
-        if folder_path:
-            self.dask_model.output_folder = folder_path
+        if folder_path is not None:
+            self.folder_path = folder_path
 
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)
@@ -332,6 +357,8 @@ class PixelClassificationWidget(QWidget):
     def _update_seg_layer(self, proba):
         # data = numpy.argmax(proba, axis=0).astype(numpy.uint8) + 1
         data = proba.astype(numpy.uint8)
+        # proba.to_zarr(os.path.join(self.folder_path, "results.zarr"))
+        # data = da.from_zarr(os.path.join(self.folder_path, "results.zarr"))
         try:
             layer = self._viewer.layers[self.SEG_LAYER_PARAMS["name"]]
             layer.data = data
