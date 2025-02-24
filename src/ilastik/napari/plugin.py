@@ -19,6 +19,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QFileDialog,
+    QLabel,
+    QSizePolicy,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -40,8 +42,15 @@ class Dask_model:
         self.output_folder = output_folder
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
+
         pipe = Pipeline(estimators)
-        feature_map_lazy = pipe.transform(image).rechunk("auto")
+
+        arrays = []
+        for i in image:
+            arrays.append(pipe.transform(i))
+
+        feature_map_lazy = da.concatenate(arrays, axis=2)
+
         feature_map_lazy.to_zarr(
             preprocessing_path, "array.zarr", overwrite=True
         )  # this could be large
@@ -108,7 +117,7 @@ class Dask_model:
 
         return array_result
 
-    @thread_worker
+    # @thread_worker
     def _dask_workflow(self, image, labels, features, to_train):
         assert self.output_folder is not None, (
             "Output folder is 'None' please pass a valid directory"
@@ -269,6 +278,9 @@ class PixelClassificationWidget(QWidget):
         output_type_layout.addWidget(probabilities_button)
         output_type_group.setLayout(output_type_layout)
 
+        self.train_checkbox = QCheckBox("Train on data")
+        self.train_checkbox.setChecked(True)
+
         run_button = QPushButton("&Run")
         run_button.setEnabled(False)
         run_button.clicked.connect(self._on_run_clicked)
@@ -280,9 +292,13 @@ class PixelClassificationWidget(QWidget):
 
         output_file_group = QGroupBox("Output folder")
         folder_button = QPushButton("select folder")
-        folder_button.clicked.connect(self._select_folder)  # TODO, box with path
+        folder_button.clicked.connect(self._select_folder)
+        self.folder_label = QLabel("No folder selected")
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
+        output_file_layout.addWidget(self.folder_label)
         output_file_group.setLayout(output_file_layout)
 
         layout = QFormLayout()
@@ -291,6 +307,7 @@ class PixelClassificationWidget(QWidget):
         layout.addRow(features_button)
         layout.addRow(output_type_group)
         layout.addRow(output_file_group)
+        layout.addRow(self.train_checkbox)
         layout.addRow(run_button)
         layout.addRow(progress_bar)
         self.setLayout(layout)
@@ -325,14 +342,13 @@ class PixelClassificationWidget(QWidget):
                 for row, col in sorted(self._features_dialog.selected)
             )
         )
-
         dask_model = Dask_model(output_folder=self.folder_path)
 
         worker = dask_model._dask_workflow(
-            image_layer.data.squeeze(),  # image_layer.data (22,512,512) -> (512,512)
-            labels_layer.data.squeeze(),
+            image_layer.data,  # image_layer.data (22,512,512) -> (512,512)
+            labels_layer.data,
             features,
-            True,  # TODO, checkbox, train/inference
+            self.train_checkbox.isChecked(),
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -343,6 +359,7 @@ class PixelClassificationWidget(QWidget):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
         if folder_path is not None:
             self.folder_path = folder_path
+            self.folder_label.setText(folder_path)
 
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)

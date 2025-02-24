@@ -23,7 +23,10 @@ def _preprocessing(X, y):
     # linear_indices=da.from_zarr(  "/Users/arnedf/VIB/DATA/test_data_ilastik/linear_indices.zarr"  )
     # client=Client( n_workers=1, threads_per_worker=10 )
 
+    print(X)
+
     shape = X.shape
+    print(X.compute().shape)
     results = [da.take(X[..., i].ravel(), linear_indices) for i in range(shape[-1])]
 
     X = da.stack(results, axis=-1)
