@@ -1,5 +1,5 @@
-from typing import Any
 import os
+from typing import Any
 
 import dask.array as da
 import joblib
@@ -12,6 +12,7 @@ from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QProgressBar,
@@ -66,6 +67,7 @@ class Dask_model:
 
         logger.info(f"Client dashboard link {client.dashboard_link}")
 
+        logger.info(X)
         with joblib.parallel_backend(
             "dask"
         ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
@@ -79,6 +81,7 @@ class Dask_model:
         preprocessing_path,
         model_path,
         tmp_path,
+        predict_proba=True,
         **client_kwargs,
     ):
         # WIP
@@ -100,20 +103,44 @@ class Dask_model:
             clf
         )  # scatter the model otherwise issues with large task graph
 
+        def _predict_proba_clf(arr, model):
+            arr = model.predict_proba(arr)
+            return arr
+
         def _predict_clf(arr, model):
             arr = model.predict(arr)
             return arr.squeeze(-1)
 
-        # probably need to use map_overlap instead of map_blocks here
-        array_result = da.map_overlap(
-            _predict_clf,
-            image,
-            dtype=image.dtype,
-            drop_axis=-1,
-            chunks=image.chunks[:-1],
-            model=clf_scatter,
-            # TODO output dtype not correct, need to fix via meta
-        )
+        if not predict_proba:
+            array_result = da.map_blocks(
+                _predict_clf,
+                image,
+                dtype=image.dtype,
+                drop_axis=-1,
+                chunks=image.chunks[:-1],
+                model=clf_scatter,
+                # TODO output dtype not correct, need to fix via meta
+            )
+        else:
+            try:
+                nr_of_labels = len(clf.estimator._classes)
+            except AttributeError:
+                # run classifier on dummy set to get the number of labels
+                nr_of_labels = clf.predict_proba(
+                    numpy.zeros((1, 1, image.shape[-1]))
+                ).shape[-1]
+
+            array_result = da.map_blocks(
+                _predict_proba_clf,
+                image,
+                dtype=image.dtype,
+                drop_axis=-1,
+                new_axis=-1,
+                chunks=image.chunks[:-1]
+                + ((nr_of_labels,),),  # how can we guess this dimension
+                model=clf_scatter,
+                # TODO output dtype not correct, need to fix via meta
+            )
 
         return array_result
 
@@ -153,7 +180,7 @@ class Dask_model:
             threads_per_worker=10,
         )
 
-        return results.transpose(1, 0)
+        return results
 
 
 @thread_worker
@@ -366,16 +393,18 @@ class PixelClassificationWidget(QWidget):
         self._progress_bar.setVisible(not value)
 
     def _update_output_layers(self, proba):
+        proba.to_zarr(os.path.join(self.folder_path, "results.zarr"), overwrite=True)
+        proba = da.from_zarr(os.path.join(self.folder_path, "results.zarr"))
+
+        labels = da.argmax(proba, axis=-1) + 1
+        proba = da.max(proba, axis=-1)
+
         if self._segmentation_button.isChecked():
-            self._update_seg_layer(proba)
+            self._update_seg_layer(labels)
         if self._probabilities_button.isChecked():
             self._update_proba_layer(proba)
 
-    def _update_seg_layer(self, proba):
-        # data = numpy.argmax(proba, axis=0).astype(numpy.uint8) + 1
-        data = proba.astype(numpy.uint8)
-        # proba.to_zarr(os.path.join(self.folder_path, "results.zarr"))
-        # data = da.from_zarr(os.path.join(self.folder_path, "results.zarr"))
+    def _update_seg_layer(self, data):
         try:
             layer = self._viewer.layers[self.SEG_LAYER_PARAMS["name"]]
             layer.data = data

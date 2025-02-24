@@ -48,10 +48,7 @@ def _fit_with_dask(func, X, y, **kwargs):
 def _predict_with(func, X):
     *image_shape, n_features = X.shape
     preds = func(X.reshape((-1, n_features)))
-    if preds.size == X.size:
-        return preds.reshape(image_shape)
-    else:
-        return preds.reshape((*image_shape, -1))
+    return preds.reshape((*image_shape, -1))
 
 
 class NDSparseClassifier(
