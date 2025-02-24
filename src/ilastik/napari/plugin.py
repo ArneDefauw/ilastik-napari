@@ -144,7 +144,7 @@ class Dask_model:
 
         return array_result
 
-    # @thread_worker
+    @thread_worker
     def _dask_workflow(self, image, labels, features, to_train):
         assert self.output_folder is not None, (
             "Output folder is 'None' please pass a valid directory"
@@ -355,6 +355,7 @@ class PixelClassificationWidget(QWidget):
         self._run_button.setEnabled(
             all(c.currentData() for c in layer_combos)
             and any(b.isChecked() for b in output_buttons)
+            and self.folder_path is not None
         )
 
     def _on_run_clicked(self):
@@ -387,6 +388,8 @@ class PixelClassificationWidget(QWidget):
         if folder_path is not None:
             self.folder_path = folder_path
             self.folder_label.setText(folder_path)
+
+        self._update_widgets()
 
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)

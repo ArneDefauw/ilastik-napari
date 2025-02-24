@@ -13,7 +13,10 @@ def _fit_with(func, X, y, **kwargs):
 
 
 def _preprocessing(X, y):
+    print(y.shape)
+    print(X.shape)
     y_ravel = y.ravel()
+    print(y_ravel.shape)
     linear_indices = np.nonzero(y_ravel)[0]  # could also be done in dask
     y_data = np.take(y_ravel, linear_indices)
 
@@ -23,10 +26,17 @@ def _preprocessing(X, y):
     # linear_indices=da.from_zarr(  "/Users/arnedf/VIB/DATA/test_data_ilastik/linear_indices.zarr"  )
     # client=Client( n_workers=1, threads_per_worker=10 )
 
-    print(X)
-
     shape = X.shape
-    print(X.compute().shape)
+    # for i in linear_indices:
+    #     print(i)
+    #     print(i>=262144 or i<0)
+
+    # print(shape)
+    # print(da.take(X[..., 0].ravel(), linear_indices))
+    # for i in range(shape[-1]):
+    #     print(i)
+    #     print(X[..., i].ravel())
+    #     print(da.take(X[..., i].ravel(), linear_indices))
     results = [da.take(X[..., i].ravel(), linear_indices) for i in range(shape[-1])]
 
     X = da.stack(results, axis=-1)
@@ -48,7 +58,10 @@ def _fit_with_dask(func, X, y, **kwargs):
 def _predict_with(func, X):
     *image_shape, n_features = X.shape
     preds = func(X.reshape((-1, n_features)))
-    return preds.reshape((*image_shape, -1))
+    if preds.size == X.size:
+        return preds.reshape(image_shape)
+    else:
+        return preds.reshape((*image_shape, -1))
 
 
 class NDSparseClassifier(
