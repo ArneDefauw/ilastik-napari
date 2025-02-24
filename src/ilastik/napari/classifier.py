@@ -15,7 +15,11 @@ def _fit_with(func, X, y, **kwargs):
 def _preprocessing(X, y):
     print(y.shape)
     print(X.shape)
-    y_ravel = y.ravel()
+    # TODO find a better solution for label error inputs
+    if len(y.shape)==2:
+        y_ravel = y.ravel()
+    else:
+        y_ravel = y.sum(axis=0).ravel()
     print(y_ravel.shape)
     linear_indices = np.nonzero(y_ravel)[0]  # could also be done in dask
     y_data = np.take(y_ravel, linear_indices)
@@ -27,16 +31,6 @@ def _preprocessing(X, y):
     # client=Client( n_workers=1, threads_per_worker=10 )
 
     shape = X.shape
-    # for i in linear_indices:
-    #     print(i)
-    #     print(i>=262144 or i<0)
-
-    # print(shape)
-    # print(da.take(X[..., 0].ravel(), linear_indices))
-    # for i in range(shape[-1]):
-    #     print(i)
-    #     print(X[..., i].ravel())
-    #     print(da.take(X[..., i].ravel(), linear_indices))
     results = [da.take(X[..., i].ravel(), linear_indices) for i in range(shape[-1])]
 
     X = da.stack(results, axis=-1)
