@@ -41,7 +41,7 @@ from napari.qt.threading import thread_worker
 logger = loguru.logger
 
 
-class Dask_model:
+class Classifier:
     def __init__(self, output_folder):
         self.output_folder = output_folder
 
@@ -384,12 +384,12 @@ class PixelClassificationWidget(QWidget):
                 for row, col in sorted(self._features_dialog.selected)
             )
         )
-        dask_model = Dask_model(output_folder=self.folder_path)
+        classifier = Classifier(output_folder=self.folder_path)
 
         image_data = [_item.data for _item in selected_images]
         image = da.concatenate(image_data, axis=0)
 
-        worker = dask_model._dask_workflow(
+        worker = classifier._dask_workflow(
             image,  # (c,y,x)
             labels_layer.data.squeeze(
                 0
