@@ -14,12 +14,9 @@ def _fit_with(func, X, y, **kwargs):
 
 def _preprocessing(X, y):
     print(y.shape)
-    print(X.shape)
     # TODO find a better solution for label error inputs
-    if len(y.shape)==2:
-        y_ravel = y.ravel()
-    else:
-        y_ravel = y.sum(axis=0).ravel()
+    y_ravel = y.ravel()
+
     print(y_ravel.shape)
     linear_indices = np.nonzero(y_ravel)[0]  # could also be done in dask
     y_data = np.take(y_ravel, linear_indices)
@@ -52,10 +49,7 @@ def _fit_with_dask(func, X, y, **kwargs):
 def _predict_with(func, X):
     *image_shape, n_features = X.shape
     preds = func(X.reshape((-1, n_features)))
-    if preds.size == X.size:
-        return preds.reshape(image_shape)
-    else:
-        return preds.reshape((*image_shape, -1))
+    return preds.reshape((*image_shape, -1))
 
 
 class NDSparseClassifier(

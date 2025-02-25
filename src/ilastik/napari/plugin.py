@@ -22,6 +22,9 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QLabel,
     QSizePolicy,
+    QListWidget,
+    QListWidgetItem,
+    QAbstractItemView,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -43,7 +46,6 @@ class Dask_model:
         self.output_folder = output_folder
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
-
         pipe = Pipeline(estimators)
 
         arrays = []
@@ -269,9 +271,18 @@ class PixelClassificationWidget(QWidget):
 
         layer_model = napari_viewer.layers
 
-        image_combo = QComboBox()
-        image_combo.setModel(ImageLayerModel(layer_model, self))
-        image_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
+        # Create a QListWidget for images instead of a QComboBox.
+        self._image_list = QListWidget()
+        self._image_list.setSelectionMode(
+            QAbstractItemView.ExtendedSelection
+        )  # or MultiSelection
+        # Populate the list with image layers
+        for layer in layer_model:
+            if isinstance(layer, Image) and not isinstance(layer, Labels):
+                item = QListWidgetItem(layer.name)
+                item.setData(Qt.UserRole, layer)
+                self._image_list.addItem(item)
+        self._image_list.itemSelectionChanged.connect(lambda: self._update_widgets())
 
         labels_combo = QComboBox()
         labels_combo.setModel(LabelsLayerModel(layer_model, self))
@@ -329,7 +340,7 @@ class PixelClassificationWidget(QWidget):
         output_file_group.setLayout(output_file_layout)
 
         layout = QFormLayout()
-        layout.addRow("&Image:", image_combo)
+        layout.addRow("&Image:", self._image_list)
         layout.addRow("&Labels:", labels_combo)
         layout.addRow(features_button)
         layout.addRow(output_type_group)
@@ -340,7 +351,6 @@ class PixelClassificationWidget(QWidget):
         self.setLayout(layout)
 
         self._viewer = napari_viewer
-        self._image_combo = image_combo
         self._labels_combo = labels_combo
         self._features_dialog = features_dialog
         self._segmentation_button = segmentation_button
@@ -350,10 +360,12 @@ class PixelClassificationWidget(QWidget):
         self._update_widgets()
 
     def _update_widgets(self):
-        layer_combos = self._image_combo, self._labels_combo
-        output_buttons = self._segmentation_button, self._probabilities_button
+        # For image list, check that at least one item is selected.
+        selected_images = self._image_list.selectedItems()
+        output_buttons = (self._segmentation_button, self._probabilities_button)
         self._run_button.setEnabled(
-            all(c.currentData() for c in layer_combos)
+            len(selected_images) > 0
+            and all(c.currentData() for c in (self._labels_combo,))
             and any(b.isChecked() for b in output_buttons)
             and self.folder_path is not None
         )
@@ -361,7 +373,9 @@ class PixelClassificationWidget(QWidget):
     def _on_run_clicked(self):
         self._set_enabled(False)
 
-        image_layer: Image = self._image_combo.currentData()
+        selected_images = [
+            item.data(Qt.UserRole) for item in self._image_list.selectedItems()
+        ]
         labels_layer: Labels = self._labels_combo.currentData()
 
         features = FilterSet(
@@ -372,9 +386,14 @@ class PixelClassificationWidget(QWidget):
         )
         dask_model = Dask_model(output_folder=self.folder_path)
 
+        image_data = [_item.data for _item in selected_images]
+        image = da.concatenate(image_data, axis=0)
+
         worker = dask_model._dask_workflow(
-            image_layer.data,  # image_layer.data (22,512,512) -> (512,512)
-            labels_layer.data,
+            image,  # (c,y,x)
+            labels_layer.data.squeeze(
+                0
+            ),  # only support labels layer with one channel dimension
             features,
             self.train_checkbox.isChecked(),
         )
