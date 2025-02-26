@@ -1,4 +1,4 @@
-name: ilastik_napari_182
+name: ilastik_napari_26_2
 channels:
   - ilastik-forge
   - conda-forge
@@ -6,3 +6,9 @@ dependencies:
   - napari
   - pyqt
   - fastfilters
+  - rasterio
+  - pip
+  - pip:
+      - spatialdata
+      - napari-spatialdata
+      - git+https://github.com/saeyslab/harpy.git
