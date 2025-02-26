@@ -12,7 +12,6 @@ from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QProgressBar,
@@ -25,6 +24,7 @@ from qtpy.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QAbstractItemView,
+    QLineEdit,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -42,8 +42,12 @@ logger = loguru.logger
 
 
 class Classifier:
-    def __init__(self, output_folder):
+    DEFAULT_PREPROCESSINGS_FILE_NAME = "Preprocessings_data.zarr"
+
+    def __init__(self, output_folder, preprocessing_file_name=DEFAULT_PREPROCESSINGS_FILE_NAME, overwrite=False):
         self.output_folder = output_folder
+        self.preprocessing_file_name = preprocessing_file_name
+        self.overwrite = overwrite
 
     def preprocessing_dask(self, image, estimators, preprocessing_path=None):
         pipe = Pipeline(estimators)
@@ -55,7 +59,7 @@ class Classifier:
         feature_map_lazy = da.concatenate(arrays, axis=2)
 
         feature_map_lazy.to_zarr(
-            preprocessing_path, "array.zarr", overwrite=True
+            preprocessing_path, self.preprocessing_file_name, overwrite=self.overwrite
         )  # this could be large
         joblib.dump(pipe, os.path.join(preprocessing_path, "preprocessing_pipe.pkl"))
 
@@ -74,7 +78,7 @@ class Classifier:
             "dask"
         ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
             clf.fit(X, labels)
-        if model_path is not None:
+        if model_path:
             joblib.dump(clf, os.path.join(model_path))
 
     def pixel_classification_dask(
@@ -89,7 +93,7 @@ class Classifier:
         # WIP
         if image is None:
             # case where we train and run inference on same image
-            image = da.from_zarr(preprocessing_path, "array.zarr")
+            image = da.from_zarr(preprocessing_path, self.preprocessing_file_name)
         else:
             # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
             # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
@@ -148,8 +152,12 @@ class Classifier:
 
     @thread_worker
     def _dask_workflow(self, image, labels, features, to_train):
-        assert self.output_folder is not None, (
+        assert self.output_folder, (
             "Output folder is 'None' please pass a valid directory"
+        )
+
+        assert self.preprocessing_file_name, (
+            "preprocessings file is 'None' please pass a valid file"
         )
 
         estimators = [("features", features)]
@@ -157,7 +165,7 @@ class Classifier:
             image, estimators=estimators, preprocessing_path=self.output_folder
         )
 
-        data = da.from_zarr(os.path.join(self.output_folder, "array.zarr"))
+        data = da.from_zarr(os.path.join(self.output_folder, self.preprocessing_file_name))
 
         if to_train:
             self.pixel_training_dask(
@@ -268,21 +276,18 @@ class PixelClassificationWidget(QWidget):
         super().__init__(parent)
 
         self.folder_path = None
+        self.preprocessings_file_name = None
 
         layer_model = napari_viewer.layers
 
         # Create a QListWidget for images instead of a QComboBox.
-        self._image_list = QListWidget()
+        self._image_list = QListWidget(clicked=self._update_widgets)
         self._image_list.setSelectionMode(
             QAbstractItemView.ExtendedSelection
         )  # or MultiSelection
         # Populate the list with image layers
-        for layer in layer_model:
-            if isinstance(layer, Image) and not isinstance(layer, Labels):
-                item = QListWidgetItem(layer.name)
-                item.setData(Qt.UserRole, layer)
-                self._image_list.addItem(item)
-        self._image_list.itemSelectionChanged.connect(lambda: self._update_widgets())
+        napari_viewer.layers.events.inserted.connect(self._update_image_list)
+        napari_viewer.layers.events.removed.connect(self._update_image_list)
 
         labels_combo = QComboBox()
         labels_combo.setModel(LabelsLayerModel(layer_model, self))
@@ -329,14 +334,28 @@ class PixelClassificationWidget(QWidget):
         progress_bar.setMaximum(0)
 
         output_file_group = QGroupBox("Output folder")
+
         folder_button = QPushButton("select folder")
         folder_button.clicked.connect(self._select_folder)
-        self.folder_label = QLabel("No folder selected")
+
+        self.folder_label = QLabel()
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+
+        self.preprocessings_file_button = QPushButton("confirm preprocessings file name")
+        self.preprocessings_file_button.clicked.connect(self._select_preprocessings_file)
+
+        self.preprocessings_file_line_edit = QLineEdit(self.preprocessings_file_name)
+
+        self.overwrite = QCheckBox("overwrite")
+        self.overwrite.setChecked(False)
+
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
+        output_file_layout.addWidget(self.preprocessings_file_button)
+        output_file_layout.addWidget(self.preprocessings_file_line_edit)
+        output_file_layout.addWidget(self.overwrite)
         output_file_group.setLayout(output_file_layout)
 
         layout = QFormLayout()
@@ -361,14 +380,30 @@ class PixelClassificationWidget(QWidget):
 
     def _update_widgets(self):
         # For image list, check that at least one item is selected.
-        selected_images = self._image_list.selectedItems()
         output_buttons = (self._segmentation_button, self._probabilities_button)
         self._run_button.setEnabled(
-            len(selected_images) > 0
+            len(self._image_list.selectedItems()) > 0
             and all(c.currentData() for c in (self._labels_combo,))
             and any(b.isChecked() for b in output_buttons)
-            and self.folder_path is not None
+            and bool(self.folder_path)
+            and bool(self.preprocessings_file_name)
         )
+        self.preprocessings_file_button.setEnabled(
+            bool(self.folder_path)
+        )
+        self.preprocessings_file_line_edit.setEnabled(
+            bool(self.folder_path)
+        )
+        self.folder_label.setText(self.folder_path if self.folder_path else "No folder selected")
+        self.preprocessings_file_line_edit.setText(self.preprocessings_file_name)
+
+    def _update_image_list(self, event=None):
+        self._image_list.clear()
+        for layer in self._viewer.layers:
+            if isinstance(layer, Image):
+                item = QListWidgetItem(layer.name)
+                item.setData(Qt.UserRole, layer)
+                self._image_list.addItem(item)
 
     def _on_run_clicked(self):
         self._set_enabled(False)
@@ -384,7 +419,9 @@ class PixelClassificationWidget(QWidget):
                 for row, col in sorted(self._features_dialog.selected)
             )
         )
-        classifier = Classifier(output_folder=self.folder_path)
+        classifier = Classifier(output_folder=self.folder_path,
+                                preprocessing_file_name=self.preprocessings_file_name,
+                                overwrite=self.overwrite.isChecked(),)
 
         image_data = [_item.data for _item in selected_images]
         image = da.concatenate(image_data, axis=0)
@@ -406,7 +443,20 @@ class PixelClassificationWidget(QWidget):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
         if folder_path is not None:
             self.folder_path = folder_path
-            self.folder_label.setText(folder_path)
+
+        self.preprocessings_file_name = Classifier.DEFAULT_PREPROCESSINGS_FILE_NAME
+
+        self._update_widgets()
+
+    def _select_preprocessings_file(self):
+        file = self.preprocessings_file_line_edit.text()
+
+        if not file.isspace() and file != "":
+
+            if not file.endswith(".zarr"):
+                file += ".zarr"
+
+            self.preprocessings_file_name = file
 
         self._update_widgets()
 
