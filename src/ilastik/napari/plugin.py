@@ -10,25 +10,28 @@ from dask.distributed import Client
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
-    QProgressBar,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-    QFileDialog,
     QLabel,
-    QSizePolicy,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QAbstractItemView,
-    QLineEdit,
     QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
+from spatialdata import read_zarr
+from spatialdata import SpatialData
+from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
 from ilastik.napari.classifier import NDSparseClassifier, NDSparseDaskClassifier
@@ -476,35 +479,38 @@ class PixelClassificationWidget(QWidget):
         # maybe we should write to intermediate zarr store if arrays would become very large
         proba = proba.astype(numpy.float16).persist()
 
+        # save results in spatialdata object.
+        sdata = SpatialData()
+
         if self._segmentation_button.isChecked():
             # TODO: add code to write to multiscale
             labels = da.argmax(proba, axis=-1)
             # map to original labels
             labels = da.take(self._unique_labels, labels)
-
             labels = labels.astype(self._labels_dtype)
-            labels.to_zarr(
-                os.path.join(self.folder_path, f"{self.prefix_name}_labels.zarr"),
-                overwrite=self.overwrite.isChecked(),
+            sdata["labels"] = Labels2DModel.parse(
+                labels,
+                dims=("y", "x"),
             )
-            labels = da.from_zarr(
-                os.path.join(self.folder_path, f"{self.prefix_name}_labels.zarr"),
-                overwrite=self.overwrite.isChecked(),
-            )
-
-            self._update_seg_layer(labels)
 
         if self._probabilities_button.isChecked():
             proba = da.max(proba, axis=-1)
-            proba.to_zarr(
-                os.path.join(self.folder_path, f"{self.prefix_name}_proba.zarr"),
-                overwrite=self.overwrite.isChecked(),
+            sdata["proba"] = Image2DModel.parse(
+                proba[None, ...],
+                dims=("c", "y", "x"),
             )
-            proba = da.from_zarr(
-                os.path.join(self.folder_path, f"{self.prefix_name}_proba.zarr"),
-                overwrite=self.overwrite.isChecked(),
-            )
-            self._update_proba_layer(proba)
+
+        sdata.write(
+            os.path.join(self.folder_path, f"{self.prefix_name}_sdata.zarr"),
+            overwrite=self.overwrite.isChecked(),
+        )
+
+        sdata = read_zarr(sdata.path)
+
+        if self._segmentation_button.isChecked():
+            self._update_seg_layer(sdata["labels"].data)
+        if self._probabilities_button.isChecked():
+            self._update_proba_layer(sdata["proba"].data.squeeze(0))
 
     def _update_seg_layer(self, data):
         try:
