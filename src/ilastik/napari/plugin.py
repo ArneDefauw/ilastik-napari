@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QAbstractItemView,
     QLineEdit,
+    QMessageBox,
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
@@ -42,14 +43,23 @@ logger = loguru.logger
 
 
 class Classifier:
-    DEFAULT_PREPROCESSINGS_FILE_NAME = "Preprocessings_data.zarr"
+    PREPROCESSED_ARRAY_NAME = "preprocessed_array.zarr"
+    PREPROCESSING_PIPE_NAME = "preprocessing_pipe.pkl"
+    MODEL_NAME = "model.pkl"
 
-    def __init__(self, output_folder, preprocessing_file_name=DEFAULT_PREPROCESSINGS_FILE_NAME, overwrite=False):
+    def __init__(
+        self,
+        output_folder,
+    ):
         self.output_folder = output_folder
-        self.preprocessing_file_name = preprocessing_file_name
-        self.overwrite = overwrite
 
-    def preprocessing_dask(self, image, estimators, preprocessing_path=None):
+    def preprocessing(
+        self,
+        image,
+        estimators,
+        prefix: str,  # prefix for preprocessed array
+        overwrite: bool = False,
+    ) -> da.Array:
         pipe = Pipeline(estimators)
 
         arrays = []
@@ -59,12 +69,19 @@ class Classifier:
         feature_map_lazy = da.concatenate(arrays, axis=2)
 
         feature_map_lazy.to_zarr(
-            preprocessing_path, self.preprocessing_file_name, overwrite=self.overwrite
+            os.path.join(
+                self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}"
+            ),
+            overwrite=overwrite,
         )  # this could be large
-        joblib.dump(pipe, os.path.join(preprocessing_path, "preprocessing_pipe.pkl"))
+        joblib.dump(
+            pipe, os.path.join(self.output_folder, self.PREPROCESSING_PIPE_NAME)
+        )
+        return da.from_zarr(
+            os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")
+        )
 
-    def pixel_training_dask(self, X, labels, model_path=None, **client_kwargs):
-        # WIP
+    def pixel_training(self, X, labels, model_path, **client_kwargs):
         # load features from the zarr store
         clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
         # add the classifier to the pipe, and then dump it
@@ -78,31 +95,16 @@ class Classifier:
             "dask"
         ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
             clf.fit(X, labels)
-        if model_path:
-            joblib.dump(clf, os.path.join(model_path))
 
-    def pixel_classification_dask(
+        joblib.dump(clf, model_path)
+
+    def pixel_classification(
         self,
-        image: da.Array | None,
-        preprocessing_path,
-        model_path,
-        tmp_path,
+        image: da.Array,
+        clf,
         predict_proba=True,
         **client_kwargs,
-    ):
-        # WIP
-        if image is None:
-            # case where we train and run inference on same image
-            image = da.from_zarr(preprocessing_path, self.preprocessing_file_name)
-        else:
-            # load the preprocessing pipe from the path, do the preprocessing on image, and then do the classification
-            # this should be used if we have a new image coming in, that we want to preprocesses and classify using pretrained model.
-            preprocessing_pipe = joblib.load(preprocessing_path, "pipe.pkl")
-            image = preprocessing_pipe.transform(image)
-            # image could be large
-            image.to_zarr(tmp_path)
-            image = image.from_zarr(tmp_path)
-        clf = joblib.load(model_path)
+    ) -> da.Array:
         client = Client(**client_kwargs)
 
         clf_scatter = client.scatter(
@@ -151,40 +153,41 @@ class Classifier:
         return array_result
 
     @thread_worker
-    def _dask_workflow(self, image, labels, features, to_train):
-        assert self.output_folder, (
+    def _workflow(
+        self, image, labels, features, to_train, prefix: str, overwrite: bool
+    ):
+        assert self.output_folder is not None, (
             "Output folder is 'None' please pass a valid directory"
         )
 
-        assert self.preprocessing_file_name, (
-            "preprocessings file is 'None' please pass a valid file"
-        )
-
         estimators = [("features", features)]
-        self.preprocessing_dask(
-            image, estimators=estimators, preprocessing_path=self.output_folder
+        data = self.preprocessing(
+            image=image,
+            estimators=estimators,
+            prefix=prefix,
+            overwrite=overwrite,
         )
-
-        data = da.from_zarr(os.path.join(self.output_folder, self.preprocessing_file_name))
 
         if to_train:
-            self.pixel_training_dask(
+            self.pixel_training(
                 X=data,
                 labels=labels,
-                model_path=os.path.join(self.output_folder, "model.pkl"),
+                model_path=os.path.join(
+                    self.output_folder, self.MODEL_NAME
+                ),  # path to trained model
+                # kwargs passed to client
                 processes=False,
                 n_workers=1,
                 threads_per_worker=10,
             )
 
-        # add assert
-        # os.path.join(self.output_folder, "model.pkl")
+        model_path = os.path.join(self.output_folder, self.MODEL_NAME)
+        assert os.path.exists(model_path), f"{model_path} does not exist!"
+        clf = joblib.load(model_path)
 
-        results = self.pixel_classification_dask(
-            image=None,
-            preprocessing_path=self.output_folder,
-            model_path=os.path.join(self.output_folder, "model.pkl"),
-            tmp_path=None,
+        results = self.pixel_classification(
+            image=data,  # pass the preprocessed data
+            clf=clf,
             processes=False,
             n_workers=1,
             threads_per_worker=10,
@@ -276,7 +279,7 @@ class PixelClassificationWidget(QWidget):
         super().__init__(parent)
 
         self.folder_path = None
-        self.preprocessings_file_name = None
+        self.prefix_name = None
 
         layer_model = napari_viewer.layers
 
@@ -342,10 +345,10 @@ class PixelClassificationWidget(QWidget):
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
-        self.preprocessings_file_button = QPushButton("confirm preprocessings file name")
-        self.preprocessings_file_button.clicked.connect(self._select_preprocessings_file)
+        self.prefix_button = QPushButton("confirm prefix")
+        self.prefix_button.clicked.connect(self._select_prefix)
 
-        self.preprocessings_file_line_edit = QLineEdit(self.preprocessings_file_name)
+        self.prefix_line_edit = QLineEdit(self.prefix_name)
 
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
@@ -353,8 +356,8 @@ class PixelClassificationWidget(QWidget):
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(self.preprocessings_file_button)
-        output_file_layout.addWidget(self.preprocessings_file_line_edit)
+        output_file_layout.addWidget(self.prefix_button)
+        output_file_layout.addWidget(self.prefix_line_edit)
         output_file_layout.addWidget(self.overwrite)
         output_file_group.setLayout(output_file_layout)
 
@@ -386,16 +389,14 @@ class PixelClassificationWidget(QWidget):
             and all(c.currentData() for c in (self._labels_combo,))
             and any(b.isChecked() for b in output_buttons)
             and bool(self.folder_path)
-            and bool(self.preprocessings_file_name)
+            and bool(self.prefix_name)
         )
-        self.preprocessings_file_button.setEnabled(
-            bool(self.folder_path)
+        self.prefix_button.setEnabled(bool(self.folder_path))
+        self.prefix_line_edit.setEnabled(bool(self.folder_path))
+        self.folder_label.setText(
+            self.folder_path if self.folder_path else "No folder selected"
         )
-        self.preprocessings_file_line_edit.setEnabled(
-            bool(self.folder_path)
-        )
-        self.folder_label.setText(self.folder_path if self.folder_path else "No folder selected")
-        self.preprocessings_file_line_edit.setText(self.preprocessings_file_name)
+        self.prefix_line_edit.setText(self.prefix_name)
 
     def _update_image_list(self, event=None):
         self._image_list.clear()
@@ -411,6 +412,13 @@ class PixelClassificationWidget(QWidget):
         selected_images = [
             item.data(Qt.UserRole) for item in self._image_list.selectedItems()
         ]
+
+        if not selected_images:
+            # Show a warning message and re-enable the UI
+            QMessageBox.warning(self, "No Images Selected", "Please select images.")
+            self._set_enabled(True)
+            return
+
         labels_layer: Labels = self._labels_combo.currentData()
 
         features = FilterSet(
@@ -419,20 +427,26 @@ class PixelClassificationWidget(QWidget):
                 for row, col in sorted(self._features_dialog.selected)
             )
         )
-        classifier = Classifier(output_folder=self.folder_path,
-                                preprocessing_file_name=self.preprocessings_file_name,
-                                overwrite=self.overwrite.isChecked(),)
+        classifier = Classifier(
+            output_folder=self.folder_path,
+        )
 
         image_data = [_item.data for _item in selected_images]
         image = da.concatenate(image_data, axis=0)
 
-        worker = classifier._dask_workflow(
+        self._labels_dtype = labels_layer.data.dtype
+        self._unique_labels = numpy.unique(labels_layer.data)
+        self._unique_labels = self._unique_labels[self._unique_labels != 0]
+
+        worker = classifier._workflow(
             image,  # (c,y,x)
             labels_layer.data.squeeze(
                 0
             ),  # only support labels layer with one channel dimension
             features,
             self.train_checkbox.isChecked(),
+            self.prefix_name,
+            self.overwrite.isChecked(),
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -444,19 +458,12 @@ class PixelClassificationWidget(QWidget):
         if folder_path is not None:
             self.folder_path = folder_path
 
-        self.preprocessings_file_name = Classifier.DEFAULT_PREPROCESSINGS_FILE_NAME
+        self.prefix_name = ""
 
         self._update_widgets()
 
-    def _select_preprocessings_file(self):
-        file = self.preprocessings_file_line_edit.text()
-
-        if not file.isspace() and file != "":
-
-            if not file.endswith(".zarr"):
-                file += ".zarr"
-
-            self.preprocessings_file_name = file
+    def _select_prefix(self):
+        self.prefix_name = self.prefix_line_edit.text()
 
         self._update_widgets()
 
@@ -465,15 +472,38 @@ class PixelClassificationWidget(QWidget):
         self._progress_bar.setVisible(not value)
 
     def _update_output_layers(self, proba):
-        proba.to_zarr(os.path.join(self.folder_path, "results.zarr"), overwrite=True)
-        proba = da.from_zarr(os.path.join(self.folder_path, "results.zarr"))
-
-        labels = da.argmax(proba, axis=-1) + 1
-        proba = da.max(proba, axis=-1)
+        # TODO: make this pyramid, and add it as such to the napari viewer
+        # maybe we should write to intermediate zarr store if arrays would become very large
+        proba = proba.astype(numpy.float16).persist()
 
         if self._segmentation_button.isChecked():
+            # TODO: add code to write to multiscale
+            labels = da.argmax(proba, axis=-1)
+            # map to original labels
+            labels = da.take(self._unique_labels, labels)
+
+            labels = labels.astype(self._labels_dtype)
+            labels.to_zarr(
+                os.path.join(self.folder_path, f"{self.prefix_name}_labels.zarr"),
+                overwrite=self.overwrite.isChecked(),
+            )
+            labels = da.from_zarr(
+                os.path.join(self.folder_path, f"{self.prefix_name}_labels.zarr"),
+                overwrite=self.overwrite.isChecked(),
+            )
+
             self._update_seg_layer(labels)
+
         if self._probabilities_button.isChecked():
+            proba = da.max(proba, axis=-1)
+            proba.to_zarr(
+                os.path.join(self.folder_path, f"{self.prefix_name}_proba.zarr"),
+                overwrite=self.overwrite.isChecked(),
+            )
+            proba = da.from_zarr(
+                os.path.join(self.folder_path, f"{self.prefix_name}_proba.zarr"),
+                overwrite=self.overwrite.isChecked(),
+            )
             self._update_proba_layer(proba)
 
     def _update_seg_layer(self, data):
