@@ -1,12 +1,8 @@
 import os
 from typing import Any
-
 import dask.array as da
-import joblib
 import loguru
 import numpy
-import sparse
-from dask.distributed import Client
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
@@ -26,191 +22,21 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QTabWidget,
 )
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
 from spatialdata import read_zarr
 from spatialdata import SpatialData
 from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
-from ilastik.napari.classifier import NDSparseClassifier, NDSparseDaskClassifier
 from ilastik.napari.filters import FilterSet
 from ilastik.napari.gui import CheckboxTableDialog, rc_pairs
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer
-from napari.qt.threading import thread_worker
+from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier
 
 logger = loguru.logger
-
-
-class Classifier:
-    PREPROCESSED_ARRAY_NAME = "preprocessed_array.zarr"
-    PREPROCESSING_PIPE_NAME = "preprocessing_pipe.pkl"
-    MODEL_NAME = "model.pkl"
-
-    def __init__(
-        self,
-        output_folder,
-    ):
-        self.output_folder = output_folder
-
-    def preprocessing(
-        self,
-        image,
-        estimators,
-        prefix: str,  # prefix for preprocessed array
-        overwrite: bool = False,
-    ) -> da.Array:
-        pipe = Pipeline(estimators)
-
-        arrays = []
-        for i in image:
-            arrays.append(pipe.transform(i))
-
-        feature_map_lazy = da.concatenate(arrays, axis=2)
-
-        feature_map_lazy.to_zarr(
-            os.path.join(
-                self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}"
-            ),
-            overwrite=overwrite,
-        )  # this could be large
-        joblib.dump(
-            pipe, os.path.join(self.output_folder, self.PREPROCESSING_PIPE_NAME)
-        )
-        return da.from_zarr(
-            os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")
-        )
-
-    def pixel_training(self, X, labels, model_path, **client_kwargs):
-        # load features from the zarr store
-        clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
-        # add the classifier to the pipe, and then dump it
-
-        client = Client(**client_kwargs)
-
-        logger.info(f"Client dashboard link {client.dashboard_link}")
-
-        logger.info(X)
-        with joblib.parallel_backend(
-            "dask"
-        ):  # note, NDSparseDaskClassifier with dask backend will still load data that was annotated in memory (although not the full dataset, only non-zero labels)
-            clf.fit(X, labels)
-
-        joblib.dump(clf, model_path)
-
-    def pixel_classification(
-        self,
-        image: da.Array,
-        clf,
-        predict_proba=True,
-        **client_kwargs,
-    ) -> da.Array:
-        client = Client(**client_kwargs)
-
-        clf_scatter = client.scatter(
-            clf
-        )  # scatter the model otherwise issues with large task graph
-
-        def _predict_proba_clf(arr, model):
-            arr = model.predict_proba(arr)
-            return arr
-
-        def _predict_clf(arr, model):
-            arr = model.predict(arr)
-            return arr.squeeze(-1)
-
-        if not predict_proba:
-            array_result = da.map_blocks(
-                _predict_clf,
-                image,
-                dtype=image.dtype,
-                drop_axis=-1,
-                chunks=image.chunks[:-1],
-                model=clf_scatter,
-                # TODO output dtype not correct, need to fix via meta
-            )
-        else:
-            try:
-                nr_of_labels = len(clf.estimator._classes)
-            except AttributeError:
-                # run classifier on dummy set to get the number of labels
-                nr_of_labels = clf.predict_proba(
-                    numpy.zeros((1, 1, image.shape[-1]))
-                ).shape[-1]
-
-            array_result = da.map_blocks(
-                _predict_proba_clf,
-                image,
-                dtype=image.dtype,
-                drop_axis=-1,
-                new_axis=-1,
-                chunks=image.chunks[:-1]
-                + ((nr_of_labels,),),  # how can we guess this dimension
-                model=clf_scatter,
-                # TODO output dtype not correct, need to fix via meta
-            )
-
-        return array_result
-
-    @thread_worker
-    def _workflow(
-        self, image, labels, features, to_train, prefix: str, overwrite: bool
-    ):
-        assert self.output_folder is not None, (
-            "Output folder is 'None' please pass a valid directory"
-        )
-
-        estimators = [("features", features)]
-        data = self.preprocessing(
-            image=image,
-            estimators=estimators,
-            prefix=prefix,
-            overwrite=overwrite,
-        )
-
-        if to_train:
-            self.pixel_training(
-                X=data,
-                labels=labels,
-                model_path=os.path.join(
-                    self.output_folder, self.MODEL_NAME
-                ),  # path to trained model
-                # kwargs passed to client
-                processes=False,
-                n_workers=1,
-                threads_per_worker=10,
-            )
-
-        model_path = os.path.join(self.output_folder, self.MODEL_NAME)
-        assert os.path.exists(model_path), f"{model_path} does not exist!"
-        clf = joblib.load(model_path)
-
-        results = self.pixel_classification(
-            image=data,  # pass the preprocessed data
-            clf=clf,
-            processes=False,
-            n_workers=1,
-            threads_per_worker=10,
-        )
-
-        return results
-
-
-@thread_worker
-def _pixel_classification(image, labels, features):
-    feature_map = features.transform(numpy.asarray(image.data))
-    sparse_labels = sparse.COO.from_numpy(numpy.asarray(labels.data))
-
-    clf = NDSparseClassifier(RandomForestClassifier())
-    clf.fit(feature_map, sparse_labels)
-    res = clf.predict_proba(feature_map)
-
-    out = numpy.moveaxis(res, -1, 0)
-
-    return out
 
 
 filter_names = {
@@ -430,7 +256,7 @@ class PixelClassificationWidget(QWidget):
                 for row, col in sorted(self._features_dialog.selected)
             )
         )
-        classifier = Classifier(
+        classifier = Pixel_Classifier(
             output_folder=self.folder_path,
         )
 
@@ -443,12 +269,10 @@ class PixelClassificationWidget(QWidget):
 
         worker = classifier._workflow(
             image,  # (c,y,x)
-            labels_layer.data.squeeze(
-                0
-            ),  # only support labels layer with one channel dimension
+            labels_layer.data,  # only support labels layer with one channel dimension
             features,
-            self.train_checkbox.isChecked(),
             self.prefix_name,
+            self.train_checkbox.isChecked(),
             self.overwrite.isChecked(),
         )
 
@@ -527,3 +351,187 @@ class PixelClassificationWidget(QWidget):
             layer.data = proba
         except KeyError:
             layer = self._viewer.add_image(proba, **self.PROBA_LAYER_PARAMS)
+
+class ObjectClassificationWidget(QWidget):
+    OBJECT_LAYER_PARAMS = dict(name="ilastik-objects", opacity=1)
+
+    def __init__(self, napari_viewer: Viewer, parent=None):
+        super().__init__(parent)
+
+        self.folder_path = None
+
+        self._viewer = napari_viewer
+        layer_model = napari_viewer.layers
+
+        self._image_list = QListWidget(clicked=self._update_widgets)
+        self._image_list.setSelectionMode(
+            QAbstractItemView.ExtendedSelection
+        )
+        napari_viewer.layers.events.inserted.connect(self._update_image_list)
+        napari_viewer.layers.events.removed.connect(self._update_image_list)
+
+        annotation_combo = QComboBox()
+        annotation_combo.setModel(LabelsLayerModel(layer_model, self))
+        annotation_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
+        self.annotation_combo = annotation_combo
+
+        mask_combo = QComboBox()
+        mask_combo.setModel(LabelsLayerModel(layer_model, self))
+        mask_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
+        self.mask_combo = mask_combo
+
+        run_button = QPushButton("&Run")
+        run_button.setEnabled(False)
+        run_button.clicked.connect(self._run_object_classification)
+        self.run_button = run_button
+
+        progress_bar = QProgressBar()
+        progress_bar.setVisible(False)
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(0)
+
+        self.progress_bar = progress_bar
+
+        output_file_group = QGroupBox("Output folder")
+        folder_button = QPushButton("select folder")
+        folder_button.clicked.connect(self._select_folder)
+
+        self.folder_label = QLabel()
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+
+        self.overwrite = QCheckBox("overwrite")
+        self.overwrite.setChecked(False)
+
+        output_file_layout = QVBoxLayout()
+        output_file_layout.addWidget(folder_button)
+        output_file_layout.addWidget(self.folder_label)
+        output_file_layout.addWidget(self.overwrite)
+        output_file_group.setLayout(output_file_layout)
+
+        layout = QFormLayout()
+        layout.addRow("&Image:", self._image_list)
+        layout.addRow("&annotation:", annotation_combo)
+        layout.addRow("mask:", mask_combo)
+        layout.addRow(output_file_group)
+        layout.addRow(run_button)
+        layout.addRow(progress_bar)
+        self.setLayout(layout)
+
+        self._update_widgets()
+
+    def _update_widgets(self):
+        # For image list, check that at least one item is selected.
+        self.run_button.setEnabled(
+            len(self._image_list.selectedItems()) > 0
+            and all(c.currentData() for c in (self.annotation_combo, self.mask_combo))
+            and bool(self.folder_path)
+        )
+        self.folder_label.setText(
+            self.folder_path if self.folder_path else "No folder selected"
+        )
+
+    def _select_folder(self):
+        folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
+        if folder_path is not None:
+            self.folder_path = folder_path
+
+        self._update_widgets()
+
+
+    def _run_object_classification(self):
+        self._set_enabled(False)
+
+        selected_images = [
+            item.data(Qt.UserRole).data for item in self._image_list.selectedItems()
+        ]
+
+        if not selected_images:
+            # Show a warning message and re-enable the UI
+            QMessageBox.warning(self, "No Images Selected", "Please select images.")
+            self._set_enabled(True)
+            return
+
+        annotation_layer: Labels = self.annotation_combo.currentData()
+        mask_layer: Labels = self.mask_combo.currentData()
+
+
+        classifier = Object_Classifier(
+            output_folder=self.folder_path,
+        )
+
+        self._annotation_dtype = annotation_layer.data.dtype
+        self._unique_annotation = numpy.unique(annotation_layer.data)
+        self._unique_annotation = self._unique_annotation[self._unique_annotation != 0]
+
+        worker = classifier.object_classifier_workflow(
+            mask_layer.data,
+            selected_images,
+            annotation_layer.data,
+        )
+
+        worker.finished.connect(lambda: self._set_enabled(True))
+        worker.returned.connect(self._update_output_layers)
+        worker.start()
+
+    def _update_image_list(self, event=None):
+        self._image_list.clear()
+        for layer in self._viewer.layers:
+            if isinstance(layer, Image):
+                item = QListWidgetItem(layer.name)
+                item.setData(Qt.UserRole, layer)
+                self._image_list.addItem(item)
+        self._update_widgets
+
+    def _set_enabled(self, value):
+        self.run_button.setEnabled(value)
+        self.progress_bar.setVisible(not value)
+
+
+    def _update_output_layers(self, proba):
+        sdata = SpatialData()
+
+        sdata["labels"] = Labels2DModel.parse(
+                proba,
+                dims=("y", "x"),
+            )
+        sdata.write(
+            os.path.join(self.folder_path, "object_sdata.zarr"),
+            overwrite=self.overwrite.isChecked(),
+        )
+
+        sdata = read_zarr(sdata.path)
+
+        try:
+            layer = self._viewer.layers[self.OBJECT_LAYER_PARAMS["name"]]
+            layer.data = sdata
+        except KeyError:
+            layer = self._viewer.add_labels(sdata["predicted_labels"].data.squeeze(0), **self.OBJECT_LAYER_PARAMS)
+            layer.color_mode = "AUTO"
+            layer.editable = False
+class IlastikWidget(QWidget):
+    def __init__(self, viewer: Viewer):
+        super().__init__()
+
+        self.viewer = viewer  # Store Napari viewer reference
+        self.setLayout(QVBoxLayout())
+
+        # Create the tab widget
+        self.tabs = QTabWidget()
+
+        # Create first tab (Example: Image Loader)
+        self.tab1 = QWidget()
+        self.tab1_layout = QVBoxLayout()
+        self.tab1_layout.addWidget(PixelClassificationWidget(viewer))
+        self.tab1.setLayout(self.tab1_layout)
+        self.tabs.addTab(self.tab1, "pixel")
+
+        # Create second tab (Example: Image Processing)
+        self.tab2 = QWidget()
+        self.tab2_layout = QVBoxLayout()
+        self.tab2_layout.addWidget(ObjectClassificationWidget(viewer))
+        self.tab2.setLayout(self.tab2_layout)
+        self.tabs.addTab(self.tab2, "object")
+
+        # Add tabs to the main layout
+        self.layout().addWidget(self.tabs)
