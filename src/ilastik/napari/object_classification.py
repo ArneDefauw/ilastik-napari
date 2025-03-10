@@ -8,6 +8,7 @@ import numpy as np
 import sparse
 
 from dask.distributed import Client
+from functools import reduce
 from harpy.utils._aggregate import RasterAggregator
 from sklearn.ensemble import RandomForestClassifier
 from ilastik.napari.filters import FilterSet
@@ -162,7 +163,6 @@ class Pixel_Classifier:
 
         return array_result
 
-    @thread_worker
     def _workflow(
         self,
         image: da.Array,
@@ -222,6 +222,18 @@ class Pixel_Classifier:
 
         return results
 
+    @thread_worker
+    def _workflow_thread(
+        self,
+        image: da.Array,
+        labels: xa.DataArray | np.ndarray,
+        features:FilterSet,
+        prefix: str,
+        to_train: bool=True,
+        overwrite: bool=False,
+    ):
+        return self._workflow(image, labels, features, prefix, to_train, overwrite)
+
 class Object_Classifier:
     MASK_NAME = "masks_whole"
     ANNOTATIONS_NAME = "annotation"
@@ -256,13 +268,10 @@ class Object_Classifier:
         for index in range(len(stats)):
             prefix = stats[index]+"_"
             feature = features[index]
-            feature.set_index("cell_ID")
             feature.columns = [f"{prefix}{c}" if f"{c}".isdigit() else c for c in feature.columns]
 
-        res = dd.concat(features, axis=1)
-        res = res.drop("cell_ID", axis=1)
-        res = res.loc[res.index!=0]
-        res["cell_ID"] = res.index
+        res = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), features)
+        res = res.loc[res['cell_ID']!=0]
 
         return res
 
@@ -283,7 +292,6 @@ class Object_Classifier:
         clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, self.MODEL_NAME))
         return clf.predict(X)
 
-    @thread_worker
     def object_classifier_workflow(
         self,
         mask: da.Array | np.ndarray | xa.DataArray,
@@ -301,6 +309,7 @@ class Object_Classifier:
         image=da.concatenate(images)
         image=image[ :, None, ... ]
 
+        # TODO: when extracting features few ids are missing: 79,
         features = self.feature_extractor(mask, image, self.ALL_STATISTICAL_FUNCTIONS)
 
         annotated_cells_id, annotation=get_annotation( array_1=annotation, array_2=mask)
@@ -312,12 +321,20 @@ class Object_Classifier:
 
         y_pred_all = self.object_classification(features.drop( [ "cell_ID" ], axis=1 ))
 
-        cell_ids=features[ "cell_ID" ].compute()
+        cell_ids=features[ "cell_ID" ]
 
         assert cell_ids.shape == y_pred_all.shape
 
         max_id = cell_ids.max()
         lookup = np.zeros(max_id + 1, dtype=y_pred_all.dtype)
         lookup[cell_ids] = y_pred_all
-
         return da.take(lookup, mask)
+
+    @thread_worker
+    def object_classifier_workflow_thread(
+        self,
+        mask: da.Array | np.ndarray | xa.DataArray,
+        images: list[da.Array] | list[np.ndarray] | list[xa.DataArray],
+        annotation: da.Array | np.ndarray | xa.DataArray,
+    ) -> da.Array:
+        return self.object_classifier_workflow(mask, images, annotation)

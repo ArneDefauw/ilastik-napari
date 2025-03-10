@@ -267,7 +267,7 @@ class PixelClassificationWidget(QWidget):
         self._unique_labels = numpy.unique(labels_layer.data)
         self._unique_labels = self._unique_labels[self._unique_labels != 0]
 
-        worker = classifier._workflow(
+        worker = classifier._workflow_thread(
             image,  # (c,y,x)
             labels_layer.data,  # only support labels layer with one channel dimension
             features,
@@ -464,7 +464,7 @@ class ObjectClassificationWidget(QWidget):
         self._unique_annotation = numpy.unique(annotation_layer.data)
         self._unique_annotation = self._unique_annotation[self._unique_annotation != 0]
 
-        worker = classifier.object_classifier_workflow(
+        worker = classifier.object_classifier_workflow_thread(
             mask_layer.data,
             selected_images,
             annotation_layer.data,
@@ -506,7 +506,7 @@ class ObjectClassificationWidget(QWidget):
             layer = self._viewer.layers[self.OBJECT_LAYER_PARAMS["name"]]
             layer.data = sdata
         except KeyError:
-            layer = self._viewer.add_labels(sdata["predicted_labels"].data.squeeze(0), **self.OBJECT_LAYER_PARAMS)
+            layer = self._viewer.add_labels(sdata["labels"].data, **self.OBJECT_LAYER_PARAMS)
             layer.color_mode = "AUTO"
             layer.editable = False
 class IlastikWidget(QWidget):
