@@ -19,18 +19,22 @@ from napari.qt.threading import thread_worker
 
 logger = loguru.logger
 
-def check_and_convert_arrays_to_dask(argument):
+def check_and_convert_arrays_to_dask(
+        argument
+    ) -> da.Array:
     if isinstance(argument, np.ndarray):
         return da.from_array(argument)
     elif isinstance(argument, xa.DataArray):
         return argument.data
     elif not isinstance(argument, da.Array):
-        raise ValueError(f"The argument {argument} has data type: {type(argument)}. Please pass a value of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
+        raise TypeError(f"The argument [argument] has the wrong data type. Please pass a value of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
     return argument
 
-def check_folder_argument(output_folder):
+def check_folder_argument(
+        output_folder
+    ) -> None:
     if not isinstance(output_folder, str):
-        raise ValueError(f"The argument [output_folder] has data type: {type(output_folder)}. Please pass a [str] instead.")
+        raise TypeError(f"The argument [output_folder] has the wrong data type. Please pass a [str] instead.")
     if not os.path.isdir(output_folder):
         raise NotADirectoryError(f"The given path: {output_folder} for argument [output_folder] is not a directory. Please pass a valid one.")
 
@@ -63,8 +67,8 @@ class Pixel_Classifier:
 
     def preprocessing(
         self,
-        image,
-        estimators,
+        image: da.Array,
+        estimators:list[tuple[str, FilterSet]],
         prefix: str,  # prefix for preprocessed array
         overwrite: bool = False,
     ) -> da.Array:
@@ -89,7 +93,12 @@ class Pixel_Classifier:
             os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")
         )
 
-    def pixel_training(self, X, labels, model_path, **client_kwargs):
+    def pixel_training(self,
+        X: da.Array,
+        labels: xa.DataArray | np.ndarray,
+        model_path: str,
+        **client_kwargs
+    ) -> None:
         # load features from the zarr store
         clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
         # add the classifier to the pipe, and then dump it
@@ -110,7 +119,7 @@ class Pixel_Classifier:
         self,
         image: da.Array,
         clf: NDSparseDaskClassifier,
-        predict_proba=True,
+        predict_proba: bool = True,
         **client_kwargs,
     ) -> da.Array:
         # check arguments
@@ -172,18 +181,31 @@ class Pixel_Classifier:
         to_train: bool=True,
         overwrite: bool=False,
     ):
-        # check arguments
+        # check arguments if they have the write datatype and converts if possible
         image = check_and_convert_arrays_to_dask(image)
 
         if isinstance(labels, xa.DataArray):
             labels = labels.values
         elif not isinstance(labels, np.ndarray):
-            raise ValueError(f"The argument [labels] has data type: {type(labels)}. Please pass a value of the following data types [numpy.ndarray, xarray.DataArray].")
+            raise TypeError("The argument [labels] has the wrong data type. Please pass a value of the following data types [numpy.ndarray, xarray.DataArray].")
 
         check_folder_argument(self.output_folder)
 
         if len(labels.shape)>2:
             labels = labels.squeeze(0)
+
+        if not isinstance(features, FilterSet):
+            raise TypeError("The argument [labels] has the wrong data type. Please pass a FilterSet")
+
+        if not isinstance(prefix, str):
+            raise TypeError("The argument [labels] has the wrong data type. Please pass a str")
+
+        if prefix.isspace() or prefix=="":
+            raise ValueError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
+
+        if os.path.exists(os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")) and not overwrite:
+            raise FileExistsError("File already exists please change the folder path or check the overwrite option")
+
 
         # Start of workflow
         estimators = [("features", features)]
@@ -209,7 +231,6 @@ class Pixel_Classifier:
             )
 
         model_path = os.path.join(self.output_folder, self.MODEL_NAME)
-        assert os.path.exists(model_path), f"{model_path} does not exist!"
         clf = joblib.load(model_path)
 
         results = self.pixel_classification(
@@ -251,15 +272,11 @@ class Object_Classifier:
 
     def feature_extractor(
         self,
-        mask: da.Array | np.ndarray | xa.DataArray,
-        image: da.Array | np.ndarray | xa.DataArray,
+        mask: da.Array,
+        image: da.Array,
         stats:tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
     ) -> dd.DataFrame:
-
-        # argument checks
-        mask = check_and_convert_arrays_to_dask(mask)
-        image = check_and_convert_arrays_to_dask(image)
-
+        # feature extraction
         mask = mask[None, ...]
 
         aggregator=RasterAggregator(mask_dask_array=mask, image_dask_array=image)
@@ -287,7 +304,7 @@ class Object_Classifier:
 
     def object_classification(
         self,
-        X,
+        X: dd.DataFrame,
     ) -> np.ndarray:
         clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, self.MODEL_NAME))
         return clf.predict(X)
@@ -295,21 +312,25 @@ class Object_Classifier:
     def object_classifier_workflow(
         self,
         mask: da.Array | np.ndarray | xa.DataArray,
-        images: list[da.Array] | list[np.ndarray] | list[xa.DataArray],
+        images: list[da.Array | np.ndarray | xa.DataArray],
         annotation: da.Array | np.ndarray | xa.DataArray,
     ) -> da.Array:
+
+        # check arguments if they have the write datatype and converts if possible
         mask = check_and_convert_arrays_to_dask(mask)
+
+        if len(annotation.shape)>2:
+            annotation = annotation.squeeze()
         annotation = check_and_convert_arrays_to_dask(annotation)
 
         if isinstance(images, list):
             images = [check_and_convert_arrays_to_dask(index) for index in images]
         else:
-            raise ValueError(f"The argument [images] has data type: {type(mask)}. Please pass a [list] of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
+            raise TypeError(f"The argument [images] has the wrong data type. Please pass a [list] of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
 
         image=da.concatenate(images)
         image=image[ :, None, ... ]
 
-        # TODO: when extracting features few ids are missing: 79,
         features = self.feature_extractor(mask, image, self.ALL_STATISTICAL_FUNCTIONS)
 
         annotated_cells_id, annotation=get_annotation( array_1=annotation, array_2=mask)

@@ -99,6 +99,15 @@ class LabelsLayerModel(LayerModel):
     def should_accept_layer(self, layer: Layer) -> bool:
         return isinstance(layer, Labels)
 
+class ImageViewQListWidget(QListWidget):
+    def __init__(self, update_function=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._update_widgets = update_function  # Store the function reference
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)  # Keep default behavior
+        if self._update_widgets:
+            self._update_widgets()
 
 class PixelClassificationWidget(QWidget):
     SEG_LAYER_PARAMS = dict(name="ilastik-segmentation", opacity=1)
@@ -112,12 +121,11 @@ class PixelClassificationWidget(QWidget):
 
         layer_model = napari_viewer.layers
 
-        # Create a QListWidget for images instead of a QComboBox.
-        self._image_list = QListWidget(clicked=self._update_widgets)
+
+        self._image_list = ImageViewQListWidget(self._update_widgets)
         self._image_list.setSelectionMode(
             QAbstractItemView.ExtendedSelection
-        )  # or MultiSelection
-        # Populate the list with image layers
+        )
         napari_viewer.layers.events.inserted.connect(self._update_image_list)
         napari_viewer.layers.events.removed.connect(self._update_image_list)
 
@@ -242,12 +250,6 @@ class PixelClassificationWidget(QWidget):
             item.data(Qt.UserRole) for item in self._image_list.selectedItems()
         ]
 
-        if not selected_images:
-            # Show a warning message and re-enable the UI
-            QMessageBox.warning(self, "No Images Selected", "Please select images.")
-            self._set_enabled(True)
-            return
-
         labels_layer: Labels = self._labels_combo.currentData()
 
         features = FilterSet(
@@ -363,7 +365,7 @@ class ObjectClassificationWidget(QWidget):
         self._viewer = napari_viewer
         layer_model = napari_viewer.layers
 
-        self._image_list = QListWidget(clicked=self._update_widgets)
+        self._image_list = ImageViewQListWidget(self._update_widgets)
         self._image_list.setSelectionMode(
             QAbstractItemView.ExtendedSelection
         )
@@ -446,12 +448,6 @@ class ObjectClassificationWidget(QWidget):
             item.data(Qt.UserRole).data for item in self._image_list.selectedItems()
         ]
 
-        if not selected_images:
-            # Show a warning message and re-enable the UI
-            QMessageBox.warning(self, "No Images Selected", "Please select images.")
-            self._set_enabled(True)
-            return
-
         annotation_layer: Labels = self.annotation_combo.currentData()
         mask_layer: Labels = self.mask_combo.currentData()
 
@@ -509,29 +505,29 @@ class ObjectClassificationWidget(QWidget):
             layer = self._viewer.add_labels(sdata["labels"].data, **self.OBJECT_LAYER_PARAMS)
             layer.color_mode = "AUTO"
             layer.editable = False
+
 class IlastikWidget(QWidget):
     def __init__(self, viewer: Viewer):
         super().__init__()
 
-        self.viewer = viewer  # Store Napari viewer reference
+        self.viewer = viewer
         self.setLayout(QVBoxLayout())
 
-        # Create the tab widget
+
         self.tabs = QTabWidget()
 
-        # Create first tab (Example: Image Loader)
+        # Add pixel classification widget
         self.tab1 = QWidget()
         self.tab1_layout = QVBoxLayout()
         self.tab1_layout.addWidget(PixelClassificationWidget(viewer))
         self.tab1.setLayout(self.tab1_layout)
         self.tabs.addTab(self.tab1, "pixel")
 
-        # Create second tab (Example: Image Processing)
+        #  Add Object classification widget
         self.tab2 = QWidget()
         self.tab2_layout = QVBoxLayout()
         self.tab2_layout.addWidget(ObjectClassificationWidget(viewer))
         self.tab2.setLayout(self.tab2_layout)
         self.tabs.addTab(self.tab2, "object")
 
-        # Add tabs to the main layout
         self.layout().addWidget(self.tabs)
