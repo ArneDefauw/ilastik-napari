@@ -27,14 +27,14 @@ def check_and_convert_arrays_to_dask(
     elif isinstance(argument, xa.DataArray):
         return argument.data
     elif not isinstance(argument, da.Array):
-        raise TypeError(f"The argument [argument] has the wrong data type. Please pass a value of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
+        raise TypeError("The argument [argument] has the wrong data type. Please pass a value of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
     return argument
 
 def check_folder_argument(
         output_folder
     ) -> None:
     if not isinstance(output_folder, str):
-        raise TypeError(f"The argument [output_folder] has the wrong data type. Please pass a [str] instead.")
+        raise TypeError("The argument [output_folder] has the wrong data type. Please pass a [str] instead.")
     if not os.path.isdir(output_folder):
         raise NotADirectoryError(f"The given path: {output_folder} for argument [output_folder] is not a directory. Please pass a valid one.")
 
@@ -79,6 +79,7 @@ class Pixel_Classifier:
             arrays.append(pipe.transform(i))
 
         feature_map_lazy = da.concatenate(arrays, axis=2)
+        feature_map_lazy = feature_map_lazy.rechunk(feature_map_lazy.chunksize[:-1] + ((feature_map_lazy.shape[-1]),))
 
         feature_map_lazy.to_zarr(
             os.path.join(
@@ -122,8 +123,6 @@ class Pixel_Classifier:
         predict_proba: bool = True,
         **client_kwargs,
     ) -> da.Array:
-        # check arguments
-        image = check_and_convert_arrays_to_dask(image)
 
         client = Client(**client_kwargs)
 
@@ -162,8 +161,8 @@ class Pixel_Classifier:
                 _predict_proba_clf,
                 image,
                 dtype=image.dtype,
-                drop_axis=-1,
-                new_axis=-1,
+                # drop_axis=-1,
+                # new_axis=-1,
                 chunks=image.chunks[:-1]
                 + ((nr_of_labels,),),  # how can we guess this dimension
                 model=clf_scatter,
@@ -174,7 +173,7 @@ class Pixel_Classifier:
 
     def _workflow(
         self,
-        image: da.Array,
+        images: da.Array | np.ndarray | xa.DataArray,
         labels: xa.DataArray | np.ndarray,
         features:FilterSet,
         prefix: str,
@@ -182,7 +181,7 @@ class Pixel_Classifier:
         overwrite: bool=False,
     ):
         # check arguments if they have the write datatype and converts if possible
-        image = check_and_convert_arrays_to_dask(image)
+        images = check_and_convert_arrays_to_dask(images)
 
         if isinstance(labels, xa.DataArray):
             labels = labels.values
@@ -201,23 +200,23 @@ class Pixel_Classifier:
             raise TypeError("The argument [labels] has the wrong data type. Please pass a str")
 
         if prefix.isspace() or prefix=="":
-            raise ValueError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
+            raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
 
         if os.path.exists(os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")) and not overwrite:
             raise FileExistsError("File already exists please change the folder path or check the overwrite option")
 
-
         # Start of workflow
         estimators = [("features", features)]
-
+        logger.info("PIXEL CLASSIFICATION: starting preprocessing")
         data = self.preprocessing(
-            image=image,
+            image=images,
             estimators=estimators,
             prefix=prefix,
             overwrite=overwrite,
         )
 
         if to_train:
+            logger.info("PIXEL CLASSIFICATION: starting training")
             self.pixel_training(
                 X=data,
                 labels=labels,
@@ -233,6 +232,7 @@ class Pixel_Classifier:
         model_path = os.path.join(self.output_folder, self.MODEL_NAME)
         clf = joblib.load(model_path)
 
+        logger.info("PIXEL CLASSIFICATION: starting classification")
         results = self.pixel_classification(
             image=data,  # pass the preprocessed data
             clf=clf,
@@ -279,6 +279,13 @@ class Object_Classifier:
         # feature extraction
         mask = mask[None, ...]
 
+        print(mask.chunksize)
+        print(image.chunksize)
+
+        if mask.chunksize != image.chunksize[1:]:
+            logger.warning("Mask chunks and image chunks are not the same. Changing mask chunks...")
+            mask = mask.rechunk(image.chunksize[1:])
+
         aggregator=RasterAggregator(mask_dask_array=mask, image_dask_array=image)
         features=aggregator.aggregate_stats(stats_funcs=stats)
 
@@ -312,7 +319,7 @@ class Object_Classifier:
     def object_classifier_workflow(
         self,
         mask: da.Array | np.ndarray | xa.DataArray,
-        images: list[da.Array | np.ndarray | xa.DataArray],
+        images: da.Array | np.ndarray | xa.DataArray,
         annotation: da.Array | np.ndarray | xa.DataArray,
     ) -> da.Array:
 
@@ -323,23 +330,23 @@ class Object_Classifier:
             annotation = annotation.squeeze()
         annotation = check_and_convert_arrays_to_dask(annotation)
 
-        if isinstance(images, list):
-            images = [check_and_convert_arrays_to_dask(index) for index in images]
-        else:
-            raise TypeError(f"The argument [images] has the wrong data type. Please pass a [list] of the following data types [dask.array.Array, numpy.ndarray, xarray.DataArray].")
+        images = check_and_convert_arrays_to_dask(images)
 
-        image=da.concatenate(images)
-        image=image[ :, None, ... ]
+        # start workflow
+        images=images[ :, None, ... ]
 
-        features = self.feature_extractor(mask, image, self.ALL_STATISTICAL_FUNCTIONS)
+        logger.info("OBJECT CLASSIFICATION: extracting features")
+        features = self.feature_extractor(mask, images, self.ALL_STATISTICAL_FUNCTIONS)
 
         annotated_cells_id, annotation=get_annotation( array_1=annotation, array_2=mask)
 
         X_train=features[ features[ "cell_ID" ].isin( annotated_cells_id )]
         X_train = X_train.drop("cell_ID", axis=1)
 
+        logger.info("OBJECT CLASSIFICATION: starting training")
         self.object_training(X_train, annotation)
 
+        logger.info("OBJECT CLASSIFICATION: starting classification")
         y_pred_all = self.object_classification(features.drop( [ "cell_ID" ], axis=1 ))
 
         cell_ids=features[ "cell_ID" ]
@@ -359,3 +366,8 @@ class Object_Classifier:
         annotation: da.Array | np.ndarray | xa.DataArray,
     ) -> da.Array:
         return self.object_classifier_workflow(mask, images, annotation)
+
+class InvalidPrefixError(ValueError):
+
+    def __init__(self,*args):
+        super().__init__(*args)

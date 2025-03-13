@@ -3,7 +3,7 @@ from typing import Iterable, Mapping, Sequence, Set, Tuple
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QStandardItem, QStandardItemModel
-from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout
+from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox
 
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
@@ -120,3 +120,12 @@ class CheckboxTableDialog(QDialog):
         for k in self._model:
             self._model[k] = value
         self._update_widgets()
+
+class ErrorMessageBox(QMessageBox):
+
+    def __init__(self, message, **kwargs):
+        super().__init__(**kwargs)
+        self.setIcon(QMessageBox.Critical)
+        self.setText("An error occurred:")
+        self.setInformativeText(message)
+        self.setWindowTitle("Error")

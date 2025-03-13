@@ -16,7 +16,6 @@ from qtpy.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -30,11 +29,11 @@ from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
 from ilastik.napari.filters import FilterSet
-from ilastik.napari.gui import CheckboxTableDialog, rc_pairs
+from ilastik.napari.gui import CheckboxTableDialog, rc_pairs, ErrorMessageBox
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer
-from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier
+from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, InvalidPrefixError
 
 logger = loguru.logger
 
@@ -57,6 +56,15 @@ filter_list = (
 )
 scale_list = (0.3, 0.7, 1.0, 1.6, 3.5, 5.0, 10.0)
 
+def thread_handeler(exec:Exception):
+    logger.error(exec)
+
+    if isinstance(exec, InvalidPrefixError):
+        ErrorMessageBox("Invalid prefix").exec_()
+    elif isinstance(exec, FileExistsError):
+        ErrorMessageBox("File already exists").exec_()
+    else:
+        ErrorMessageBox("Something went wrong").exec_()
 
 class LayerModel(QSortFilterProxyModel):
     def __init__(self, layers: LayerList, parent=None):
@@ -102,10 +110,10 @@ class LabelsLayerModel(LayerModel):
 class ImageViewQListWidget(QListWidget):
     def __init__(self, update_function=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._update_widgets = update_function  # Store the function reference
+        self._update_widgets = update_function
 
     def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)  # Keep default behavior
+        super().mouseReleaseEvent(event)
         if self._update_widgets:
             self._update_widgets()
 
@@ -280,6 +288,7 @@ class PixelClassificationWidget(QWidget):
 
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
+        worker.errored.connect(thread_handeler)
         worker.start()
 
     def _select_folder(self):
@@ -448,13 +457,18 @@ class ObjectClassificationWidget(QWidget):
             item.data(Qt.UserRole).data for item in self._image_list.selectedItems()
         ]
 
+        selected_images=da.concatenate(selected_images)
+
         annotation_layer: Labels = self.annotation_combo.currentData()
         mask_layer: Labels = self.mask_combo.currentData()
 
 
-        classifier = Object_Classifier(
-            output_folder=self.folder_path,
-        )
+        try:
+            classifier = Object_Classifier(
+                output_folder=self.folder_path,
+            )
+        except NotADirectoryError:
+            ErrorMessageBox("Invalid Folder")
 
         self._annotation_dtype = annotation_layer.data.dtype
         self._unique_annotation = numpy.unique(annotation_layer.data)
@@ -468,6 +482,7 @@ class ObjectClassificationWidget(QWidget):
 
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
+        worker.errored.connect(thread_handeler)
         worker.start()
 
     def _update_image_list(self, event=None):
@@ -482,6 +497,8 @@ class ObjectClassificationWidget(QWidget):
     def _set_enabled(self, value):
         self.run_button.setEnabled(value)
         self.progress_bar.setVisible(not value)
+
+        self._update_widgets()
 
 
     def _update_output_layers(self, proba):
