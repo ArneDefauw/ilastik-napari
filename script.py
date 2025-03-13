@@ -7,7 +7,7 @@ import debugpy
 # Enable debugpy and wait for debugger
 debugpy.listen(("localhost", 5778))
 print("Waiting for debugger to attach...")
-debugpy.wait_for_client()  # Optional: only proceed once the debugger is attached
+# debugpy.wait_for_client()  # Optional: only proceed once the debugger is attached
 
 # Start Napari
 viewer = napari.Viewer()

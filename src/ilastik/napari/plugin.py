@@ -3,6 +3,7 @@ from typing import Any
 import dask.array as da
 import loguru
 import numpy
+from spatialdata import get_pyramid_levels
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
 from qtpy.QtWidgets import (
@@ -326,6 +327,7 @@ class PixelClassificationWidget(QWidget):
             sdata["labels"] = Labels2DModel.parse(
                 labels,
                 dims=("y", "x"),
+                scale_factors=[2, 2, 2],
             )
 
         if self._probabilities_button.isChecked():
@@ -333,6 +335,7 @@ class PixelClassificationWidget(QWidget):
             sdata["proba"] = Image2DModel.parse(
                 proba[None, ...],
                 dims=("c", "y", "x"),
+                scale_factors=[2, 2, 2],
             )
 
         sdata.write(
@@ -343,16 +346,16 @@ class PixelClassificationWidget(QWidget):
         sdata = read_zarr(sdata.path)
 
         if self._segmentation_button.isChecked():
-            self._update_seg_layer(sdata["labels"].data)
+            self._update_seg_layer([i.data for i in get_pyramid_levels(sdata["labels"])])
         if self._probabilities_button.isChecked():
-            self._update_proba_layer(sdata["proba"].data.squeeze(0))
+            self._update_proba_layer([i.data for i in get_pyramid_levels(sdata["proba"])])
 
     def _update_seg_layer(self, data):
         try:
             layer = self._viewer.layers[self.SEG_LAYER_PARAMS["name"]]
             layer.data = data
         except KeyError:
-            layer = self._viewer.add_labels(data, **self.SEG_LAYER_PARAMS)
+            layer = self._viewer.add_labels(data, multiscale=True, **self.SEG_LAYER_PARAMS)
             layer.color_mode = "AUTO"
             layer.editable = False
 
@@ -361,7 +364,7 @@ class PixelClassificationWidget(QWidget):
             layer = self._viewer.layers[self.PROBA_LAYER_PARAMS["name"]]
             layer.data = proba
         except KeyError:
-            layer = self._viewer.add_image(proba, **self.PROBA_LAYER_PARAMS)
+            layer = self._viewer.add_image(proba, multiscale=True, **self.PROBA_LAYER_PARAMS)
 
 class ObjectClassificationWidget(QWidget):
     OBJECT_LAYER_PARAMS = dict(name="ilastik-objects", opacity=1)
@@ -507,6 +510,7 @@ class ObjectClassificationWidget(QWidget):
         sdata["labels"] = Labels2DModel.parse(
                 proba,
                 dims=("y", "x"),
+                scale_factors=[2, 2, 2],
             )
         sdata.write(
             os.path.join(self.folder_path, "object_sdata.zarr"),
@@ -519,7 +523,7 @@ class ObjectClassificationWidget(QWidget):
             layer = self._viewer.layers[self.OBJECT_LAYER_PARAMS["name"]]
             layer.data = sdata
         except KeyError:
-            layer = self._viewer.add_labels(sdata["labels"].data, **self.OBJECT_LAYER_PARAMS)
+            layer = self._viewer.add_labels([i.data for i in get_pyramid_levels(sdata["labels"])], multiscale=True, **self.OBJECT_LAYER_PARAMS)
             layer.color_mode = "AUTO"
             layer.editable = False
 
