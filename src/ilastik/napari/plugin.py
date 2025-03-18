@@ -4,7 +4,6 @@ import dask.array as da
 import xarray as xa
 import loguru
 import numpy
-import numpy as np
 from spatialdata import get_pyramid_levels
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
@@ -32,7 +31,7 @@ from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
 from ilastik.napari.filters import FilterSet, EmptyFilterListError
-from ilastik.napari.gui import CheckboxTableDialog, rc_pairs, ErrorMessageBox
+from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer
@@ -80,7 +79,7 @@ def check_and_convert_multilayer(input):
     if input.multiscale:
         return input.data._data[0]
     else:
-        return input
+        return input.data
 
 def set_features(defaults:list[float]=[1.0]):
     result = dict()
@@ -437,6 +436,10 @@ class ObjectClassificationWidget(QWidget):
         mask_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
         self.mask_combo = mask_combo
 
+        self.stat_func = CheckboxDialog(Object_Classifier.ALL_STATISTICAL_FUNCTIONS, True, parent=self)
+        stat_button = QPushButton("Statistical Functions")
+        stat_button.clicked.connect(self.stat_func.open)
+
         run_button = QPushButton("&Run")
         run_button.setEnabled(False)
         run_button.clicked.connect(self._run_object_classification)
@@ -470,6 +473,7 @@ class ObjectClassificationWidget(QWidget):
         layout.addRow("&Image:", self._image_list)
         layout.addRow("&annotation:", annotation_combo)
         layout.addRow("mask:", mask_combo)
+        layout.addRow(stat_button)
         layout.addRow(output_file_group)
         layout.addRow(run_button)
         layout.addRow(progress_bar)
@@ -500,7 +504,7 @@ class ObjectClassificationWidget(QWidget):
         self._set_enabled(False)
 
         selected_images = [
-            check_and_convert_multilayer(item.data(Qt.UserRole).data) for item in self._image_list.selectedItems()
+            check_and_convert_multilayer(item.data(Qt.UserRole)) for item in self._image_list.selectedItems()
         ]
 
         selected_images=da.concatenate(selected_images)
@@ -521,9 +525,10 @@ class ObjectClassificationWidget(QWidget):
         self._unique_annotation = self._unique_annotation[self._unique_annotation != 0]
 
         worker = classifier.object_classifier_workflow_thread(
-            check_and_convert_multilayer(mask_layer.data),
+            check_and_convert_multilayer(mask_layer),
             selected_images,
             annotation_layer.data,
+            self.stat_func.get_stat_functions(),
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))

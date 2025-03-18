@@ -3,7 +3,7 @@ from typing import Iterable, Mapping, Sequence, Set, Tuple
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QStandardItem, QStandardItemModel
-from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox
+from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox, QCheckBox
 
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
@@ -119,6 +119,63 @@ class CheckboxTableDialog(QDialog):
     def _handle_select(self, value):
         for k in self._model:
             self._model[k] = value
+        self._update_widgets()
+
+class StoredQCheckbox(QCheckBox):
+    def __init__(self, item, *, parent=None, update_function=None):
+        super().__init__(parent)
+        self.setText(item)
+        self.item = item
+        if update_function:
+            self.stateChanged.connect(update_function)
+class CheckboxDialog(QDialog):
+    def __init__(self, item_list, default=True, *, parent=None):
+        super().__init__(parent)
+
+        stat_layout = QVBoxLayout()
+
+        self.stats = []
+
+        for i in item_list:
+            checkbox = StoredQCheckbox(i, update_function=self._update_widgets)
+            stat_layout.addWidget(checkbox)
+            self.stats.append(checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        select_all = buttons.addButton("Select All", QDialogButtonBox.ActionRole)
+        select_all.clicked.connect(lambda: self._handle_select(True))
+
+        deselect_all = buttons.addButton("Deselect All", QDialogButtonBox.ActionRole)
+        deselect_all.clicked.connect(lambda: self._handle_select(False))
+
+        layout = QVBoxLayout()
+        layout.addLayout(stat_layout)  # Corrected from addWidget to addLayout
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+        self._ok_button = buttons.button(QDialogButtonBox.Ok)
+
+        self._handle_select(default)
+
+    def get_stat_functions(self):
+        result = []
+
+        for i in self.stats:
+            if i.isChecked():
+                result.append(i.item)
+        return result
+
+    def _update_widgets(self):
+        self._ok_button.setEnabled(any([i.isChecked() for i in self.stats]))
+
+    def _handle_select(self, value):
+        state = Qt.Checked if value else Qt.Unchecked
+        for k in self.stats:
+            k.setCheckState(state)
+
         self._update_widgets()
 
 class ErrorMessageBox(QMessageBox):

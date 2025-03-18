@@ -279,8 +279,7 @@ class Object_Classifier:
         # feature extraction
         mask = mask[None, ...]
 
-        print(mask.chunksize)
-        print(image.chunksize)
+        print(stats)
 
         if mask.chunksize != image.chunksize[1:]:
             logger.warning("Mask chunks and image chunks are not the same. Changing mask chunks...")
@@ -321,6 +320,7 @@ class Object_Classifier:
         mask: da.Array | np.ndarray | xa.DataArray,
         images: da.Array | np.ndarray | xa.DataArray,
         annotation: da.Array | np.ndarray | xa.DataArray,
+        statistical_functions: tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
     ) -> da.Array:
 
         # check arguments if they have the write datatype and converts if possible
@@ -336,7 +336,7 @@ class Object_Classifier:
         images=images[ :, None, ... ]
 
         logger.info("OBJECT CLASSIFICATION: extracting features")
-        features = self.feature_extractor(mask, images, self.ALL_STATISTICAL_FUNCTIONS)
+        features = self.feature_extractor(mask, images, statistical_functions)
 
         annotated_cells_id, annotation=get_annotation( array_1=annotation, array_2=mask)
 
@@ -364,8 +364,9 @@ class Object_Classifier:
         mask: da.Array | np.ndarray | xa.DataArray,
         images: list[da.Array] | list[np.ndarray] | list[xa.DataArray],
         annotation: da.Array | np.ndarray | xa.DataArray,
+        statistical_functions: tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
     ) -> da.Array:
-        return self.object_classifier_workflow(mask, images, annotation)
+        return self.object_classifier_workflow(mask, images, annotation, statistical_functions)
 
 class InvalidPrefixError(Exception):
 
