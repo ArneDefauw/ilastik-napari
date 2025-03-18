@@ -128,6 +128,8 @@ class HessianOfGaussianEigenvaluesDask(SingleFilter, order=2):
 
 class FilterSet(Filter):
     def __init__(self, *, filters: Sequence[Filter]):
+        if not filters:
+            raise EmptyFilterListError("Filters is empty")
         self.filters = filters
 
     def transform(self, X):
@@ -138,3 +140,8 @@ class FilterSet(Filter):
     @property
     def kernel_size(self):
         return max(f.kernel_size for f in self.filters)
+
+class EmptyFilterListError(Exception):
+
+    def __init__(self,*args):
+        super().__init__(*args)

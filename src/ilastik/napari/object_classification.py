@@ -96,7 +96,7 @@ class Pixel_Classifier:
 
     def pixel_training(self,
         X: da.Array,
-        labels: xa.DataArray | np.ndarray,
+        labels: np.ndarray,
         model_path: str,
         **client_kwargs
     ) -> None:
@@ -203,7 +203,7 @@ class Pixel_Classifier:
             raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
 
         if os.path.exists(os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")) and not overwrite:
-            raise FileExistsError("File already exists please change the folder path or check the overwrite option")
+            raise FileExistsError("File already exists, pass a new file or set overwrite to true")
 
         # Start of workflow
         estimators = [("features", features)]
@@ -367,7 +367,7 @@ class Object_Classifier:
     ) -> da.Array:
         return self.object_classifier_workflow(mask, images, annotation)
 
-class InvalidPrefixError(ValueError):
+class InvalidPrefixError(Exception):
 
     def __init__(self,*args):
         super().__init__(*args)

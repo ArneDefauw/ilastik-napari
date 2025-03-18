@@ -1,8 +1,10 @@
 import os
 from typing import Any
 import dask.array as da
+import xarray as xa
 import loguru
 import numpy
+import numpy as np
 from spatialdata import get_pyramid_levels
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
@@ -29,7 +31,7 @@ from spatialdata import SpatialData
 from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
-from ilastik.napari.filters import FilterSet
+from ilastik.napari.filters import FilterSet, EmptyFilterListError
 from ilastik.napari.gui import CheckboxTableDialog, rc_pairs, ErrorMessageBox
 from napari import Viewer
 from napari.components import LayerList
@@ -57,15 +59,48 @@ filter_list = (
 )
 scale_list = (0.3, 0.7, 1.0, 1.6, 3.5, 5.0, 10.0)
 
-def thread_handeler(exec:Exception):
+def add_or_update_layer(data:xa.DataArray|xa.DataTree, viewer:Viewer, params:dict, type:str):
+    to_scale=False
+    if isinstance(data, xa.DataTree):
+        data = [i.data for i in get_pyramid_levels(data)]
+        to_scale = True
+
+    try:
+        layer = viewer.layers[params["name"]]
+        layer.data = data
+    except KeyError:
+        if type=="labels":
+            layer = viewer.add_labels(data, multiscale=to_scale, **params)
+            layer.color_mode = "AUTO"
+            layer.editable = False
+        elif type=="image":
+            layer = viewer.add_image(data, multiscale=to_scale, **params)
+
+def check_and_convert_multilayer(input):
+    if input.multiscale:
+        return input.data._data[0]
+    else:
+        return input
+
+def set_features(defaults:list[float]=[1.0]):
+    result = dict()
+    for i in range(len(filter_list)):
+        for j in range(len(scale_list)):
+            result[(i, j)] = scale_list[j] in defaults
+
+    return result
+
+def thread_handler(exec:Exception):
     logger.error(exec)
 
-    if isinstance(exec, InvalidPrefixError):
-        ErrorMessageBox("Invalid prefix").exec_()
-    elif isinstance(exec, FileExistsError):
-        ErrorMessageBox("File already exists").exec_()
-    else:
-        ErrorMessageBox("Something went wrong").exec_()
+    error_dir = {
+        InvalidPrefixError: ErrorMessageBox("Invalid prefix."),
+        FileExistsError: ErrorMessageBox("File already exists, please change the folder path or check the overwrite option."),
+    }
+
+    default_error_box = ErrorMessageBox("Something went wrong, check log.")
+
+    error_dir.get(type(exec), default_error_box).exec_()
 
 class LayerModel(QSortFilterProxyModel):
     def __init__(self, layers: LayerList, parent=None):
@@ -118,6 +153,17 @@ class ImageViewQListWidget(QListWidget):
         if self._update_widgets:
             self._update_widgets()
 
+class ListeningQLineEdit(QLineEdit):
+    def __init__(self, update_function=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._update_widgets = update_function
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+
+        if self._update_widgets and event.key() in {Qt.Key_Enter, Qt.Key_Return}:
+            self._update_widgets()
+
 class PixelClassificationWidget(QWidget):
     SEG_LAYER_PARAMS = dict(name="ilastik-segmentation", opacity=1)
     PROBA_LAYER_PARAMS = dict(name="ilastik-probabilities", opacity=0.75)
@@ -142,9 +188,7 @@ class PixelClassificationWidget(QWidget):
         labels_combo.setModel(LabelsLayerModel(layer_model, self))
         labels_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
 
-        features_state = dict.fromkeys(
-            rc_pairs(len(filter_list), len(scale_list)), True
-        )
+        features_state = set_features()
         for s in range(1, len(filter_list)):
             del features_state[s, 0]
         features_dialog = CheckboxTableDialog(
@@ -191,10 +235,18 @@ class PixelClassificationWidget(QWidget):
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
+        prefix_group = QGroupBox("Prefix")
+
         self.prefix_button = QPushButton("confirm prefix")
         self.prefix_button.clicked.connect(self._select_prefix)
 
-        self.prefix_line_edit = QLineEdit(self.prefix_name)
+        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
+        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
+
+        prefix_layout = QVBoxLayout()
+        prefix_layout.addWidget(self.prefix_line_edit)
+        prefix_layout.addWidget(self.prefix_button)
+        prefix_group.setLayout(prefix_layout)
 
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
@@ -202,8 +254,7 @@ class PixelClassificationWidget(QWidget):
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(self.prefix_button)
-        output_file_layout.addWidget(self.prefix_line_edit)
+        output_file_layout.addWidget(prefix_group)
         output_file_layout.addWidget(self.overwrite)
         output_file_group.setLayout(output_file_layout)
 
@@ -261,36 +312,44 @@ class PixelClassificationWidget(QWidget):
 
         labels_layer: Labels = self._labels_combo.currentData()
 
-        features = FilterSet(
-            filters=tuple(
-                filter_list[row](scale_list[col])
-                for row, col in sorted(self._features_dialog.selected)
+        try:
+            features = FilterSet(
+                filters=tuple(
+                    filter_list[row](scale_list[col])
+                    for row, col in sorted(self._features_dialog.selected)
+                )
             )
-        )
-        classifier = Pixel_Classifier(
-            output_folder=self.folder_path,
-        )
+            classifier = Pixel_Classifier(
+                output_folder=self.folder_path,
+            )
+            print(getattr(selected_images[0], "multiscale", False))
 
-        image_data = [_item.data for _item in selected_images]
-        image = da.concatenate(image_data, axis=0)
+            image_data = [check_and_convert_multilayer(_item) for _item in selected_images]
+            image = da.concatenate(image_data, axis=0)
 
-        self._labels_dtype = labels_layer.data.dtype
-        self._unique_labels = numpy.unique(labels_layer.data)
-        self._unique_labels = self._unique_labels[self._unique_labels != 0]
+            self._labels_dtype = labels_layer.data.dtype
+            self._unique_labels = numpy.unique(labels_layer.data)
+            self._unique_labels = self._unique_labels[self._unique_labels != 0]
 
-        worker = classifier._workflow_thread(
-            image,  # (c,y,x)
-            labels_layer.data,  # only support labels layer with one channel dimension
-            features,
-            self.prefix_name,
-            self.train_checkbox.isChecked(),
-            self.overwrite.isChecked(),
-        )
+            worker = classifier._workflow_thread(
+                image,  # (c,y,x)
+                labels_layer.data,  # only support labels layer with one channel dimension
+                features,
+                self.prefix_name,
+                self.train_checkbox.isChecked(),
+                self.overwrite.isChecked(),
+            )
 
-        worker.finished.connect(lambda: self._set_enabled(True))
-        worker.returned.connect(self._update_output_layers)
-        worker.errored.connect(thread_handeler)
-        worker.start()
+            worker.finished.connect(lambda: self._set_enabled(True))
+            worker.returned.connect(self._update_output_layers)
+            worker.errored.connect(thread_handler)
+            worker.start()
+        except EmptyFilterListError:
+            ErrorMessageBox("No filters has been passed").exec_()
+            self._set_enabled(True)
+        except NotADirectoryError:
+            ErrorMessageBox("The given folder does not exist").exec_()
+            self._set_enabled(True)
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
@@ -327,7 +386,6 @@ class PixelClassificationWidget(QWidget):
             sdata["labels"] = Labels2DModel.parse(
                 labels,
                 dims=("y", "x"),
-                scale_factors=[2, 2, 2],
             )
 
         if self._probabilities_button.isChecked():
@@ -335,7 +393,6 @@ class PixelClassificationWidget(QWidget):
             sdata["proba"] = Image2DModel.parse(
                 proba[None, ...],
                 dims=("c", "y", "x"),
-                scale_factors=[2, 2, 2],
             )
 
         sdata.write(
@@ -346,25 +403,11 @@ class PixelClassificationWidget(QWidget):
         sdata = read_zarr(sdata.path)
 
         if self._segmentation_button.isChecked():
-            self._update_seg_layer([i.data for i in get_pyramid_levels(sdata["labels"])])
+            # self._update_seg_layer([i.data for i in get_pyramid_levels(sdata["labels"])
+            add_or_update_layer(sdata["labels"], self._viewer, self.SEG_LAYER_PARAMS, "labels")
         if self._probabilities_button.isChecked():
-            self._update_proba_layer([i.data for i in get_pyramid_levels(sdata["proba"])])
-
-    def _update_seg_layer(self, data):
-        try:
-            layer = self._viewer.layers[self.SEG_LAYER_PARAMS["name"]]
-            layer.data = data
-        except KeyError:
-            layer = self._viewer.add_labels(data, multiscale=True, **self.SEG_LAYER_PARAMS)
-            layer.color_mode = "AUTO"
-            layer.editable = False
-
-    def _update_proba_layer(self, proba):
-        try:
-            layer = self._viewer.layers[self.PROBA_LAYER_PARAMS["name"]]
-            layer.data = proba
-        except KeyError:
-            layer = self._viewer.add_image(proba, multiscale=True, **self.PROBA_LAYER_PARAMS)
+            # self._update_proba_layer([i.data for i in get_pyramid_levels(sdata["proba"])])
+            add_or_update_layer(proba, self._viewer, self.PROBA_LAYER_PARAMS, "image")
 
 class ObjectClassificationWidget(QWidget):
     OBJECT_LAYER_PARAMS = dict(name="ilastik-objects", opacity=1)
@@ -457,7 +500,7 @@ class ObjectClassificationWidget(QWidget):
         self._set_enabled(False)
 
         selected_images = [
-            item.data(Qt.UserRole).data for item in self._image_list.selectedItems()
+            check_and_convert_multilayer(item.data(Qt.UserRole).data) for item in self._image_list.selectedItems()
         ]
 
         selected_images=da.concatenate(selected_images)
@@ -478,14 +521,14 @@ class ObjectClassificationWidget(QWidget):
         self._unique_annotation = self._unique_annotation[self._unique_annotation != 0]
 
         worker = classifier.object_classifier_workflow_thread(
-            mask_layer.data,
+            check_and_convert_multilayer(mask_layer.data),
             selected_images,
             annotation_layer.data,
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
         worker.returned.connect(self._update_output_layers)
-        worker.errored.connect(thread_handeler)
+        worker.errored.connect(thread_handler)
         worker.start()
 
     def _update_image_list(self, event=None):
@@ -510,7 +553,6 @@ class ObjectClassificationWidget(QWidget):
         sdata["labels"] = Labels2DModel.parse(
                 proba,
                 dims=("y", "x"),
-                scale_factors=[2, 2, 2],
             )
         sdata.write(
             os.path.join(self.folder_path, "object_sdata.zarr"),
@@ -519,13 +561,7 @@ class ObjectClassificationWidget(QWidget):
 
         sdata = read_zarr(sdata.path)
 
-        try:
-            layer = self._viewer.layers[self.OBJECT_LAYER_PARAMS["name"]]
-            layer.data = sdata
-        except KeyError:
-            layer = self._viewer.add_labels([i.data for i in get_pyramid_levels(sdata["labels"])], multiscale=True, **self.OBJECT_LAYER_PARAMS)
-            layer.color_mode = "AUTO"
-            layer.editable = False
+        add_or_update_layer(sdata['labels'], self._viewer, self.OBJECT_LAYER_PARAMS, "labels")
 
 class IlastikWidget(QWidget):
     def __init__(self, viewer: Viewer):
