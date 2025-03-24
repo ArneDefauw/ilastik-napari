@@ -161,8 +161,8 @@ class Pixel_Classifier:
                 _predict_proba_clf,
                 image,
                 dtype=image.dtype,
-                # drop_axis=-1,
-                # new_axis=-1,
+                drop_axis=2,
+                new_axis=2,
                 chunks=image.chunks[:-1]
                 + ((nr_of_labels,),),  # how can we guess this dimension
                 model=clf_scatter,

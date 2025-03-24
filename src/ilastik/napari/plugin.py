@@ -3,7 +3,8 @@ from typing import Any
 import dask.array as da
 import xarray as xa
 import loguru
-import numpy
+import numpy as np
+from napari_spatialdata import Interactive
 from spatialdata import get_pyramid_levels
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
@@ -57,6 +58,26 @@ filter_list = (
     # filters.HessianOfGaussianEigenvaluesDask,
 )
 scale_list = (0.3, 0.7, 1.0, 1.6, 3.5, 5.0, 10.0)
+
+def infer_scales(layers, old_scale):
+    scale = []
+    for layer in layers:
+        if layer.multiscale:
+            if old_scale:
+                logger.warning("Multiscaling has been inferred but already has scales. Changing or updating scales")
+            else:
+                logger.warning("Multiscaling has been infered adding scales")
+            shapes = [i[1] for i in layer.data.shapes]
+            base = shapes[0]
+            scale = []
+            for i in shapes[1:]:
+                scale.append(base // i)
+                base = i
+
+    if len(scale)==0 and not old_scale:
+        return None
+
+    return scale
 
 def add_or_update_layer(data:xa.DataArray|xa.DataTree, viewer:Viewer, params:dict, type:str):
     to_scale=False
@@ -174,6 +195,8 @@ class PixelClassificationWidget(QWidget):
         self.prefix_name = None
 
         layer_model = napari_viewer.layers
+
+        self.scale = None
 
 
         self._image_list = ImageViewQListWidget(self._update_widgets)
@@ -309,6 +332,8 @@ class PixelClassificationWidget(QWidget):
             item.data(Qt.UserRole) for item in self._image_list.selectedItems()
         ]
 
+        self.scale = infer_scales(selected_images, self.scale)
+
         labels_layer: Labels = self._labels_combo.currentData()
 
         try:
@@ -321,13 +346,12 @@ class PixelClassificationWidget(QWidget):
             classifier = Pixel_Classifier(
                 output_folder=self.folder_path,
             )
-            print(getattr(selected_images[0], "multiscale", False))
 
             image_data = [check_and_convert_multilayer(_item) for _item in selected_images]
             image = da.concatenate(image_data, axis=0)
 
             self._labels_dtype = labels_layer.data.dtype
-            self._unique_labels = numpy.unique(labels_layer.data)
+            self._unique_labels = np.unique(labels_layer.data)
             self._unique_labels = self._unique_labels[self._unique_labels != 0]
 
             worker = classifier._workflow_thread(
@@ -371,7 +395,7 @@ class PixelClassificationWidget(QWidget):
     def _update_output_layers(self, proba):
         # TODO: make this pyramid, and add it as such to the napari viewer
         # maybe we should write to intermediate zarr store if arrays would become very large
-        proba = proba.astype(numpy.float16).persist()
+        proba = proba.astype(np.float16).persist()
 
         # save results in spatialdata object.
         sdata = SpatialData()
@@ -385,6 +409,7 @@ class PixelClassificationWidget(QWidget):
             sdata["labels"] = Labels2DModel.parse(
                 labels,
                 dims=("y", "x"),
+                scale_factors=self.scale,
             )
 
         if self._probabilities_button.isChecked():
@@ -392,6 +417,7 @@ class PixelClassificationWidget(QWidget):
             sdata["proba"] = Image2DModel.parse(
                 proba[None, ...],
                 dims=("c", "y", "x"),
+                scale_factors=self.scale,
             )
 
         sdata.write(
@@ -418,6 +444,8 @@ class ObjectClassificationWidget(QWidget):
 
         self._viewer = napari_viewer
         layer_model = napari_viewer.layers
+
+        self.scale = None
 
         self._image_list = ImageViewQListWidget(self._update_widgets)
         self._image_list.setSelectionMode(
@@ -504,14 +532,17 @@ class ObjectClassificationWidget(QWidget):
         self._set_enabled(False)
 
         selected_images = [
-            check_and_convert_multilayer(item.data(Qt.UserRole)) for item in self._image_list.selectedItems()
+            item.data(Qt.UserRole) for item in self._image_list.selectedItems()
         ]
 
-        selected_images=da.concatenate(selected_images)
+        self.scale = infer_scales(selected_images, self.scale)
+
+        images = [check_and_convert_multilayer(i) for i in selected_images]
+
+        image=da.concatenate(images)
 
         annotation_layer: Labels = self.annotation_combo.currentData()
         mask_layer: Labels = self.mask_combo.currentData()
-
 
         try:
             classifier = Object_Classifier(
@@ -521,12 +552,12 @@ class ObjectClassificationWidget(QWidget):
             ErrorMessageBox("Invalid Folder")
 
         self._annotation_dtype = annotation_layer.data.dtype
-        self._unique_annotation = numpy.unique(annotation_layer.data)
+        self._unique_annotation = np.unique(annotation_layer.data)
         self._unique_annotation = self._unique_annotation[self._unique_annotation != 0]
 
         worker = classifier.object_classifier_workflow_thread(
             check_and_convert_multilayer(mask_layer),
-            selected_images,
+            image,
             annotation_layer.data,
             self.stat_func.get_stat_functions(),
         )
@@ -558,6 +589,7 @@ class ObjectClassificationWidget(QWidget):
         sdata["labels"] = Labels2DModel.parse(
                 proba,
                 dims=("y", "x"),
+                scale_factors=self.scale,
             )
         sdata.write(
             os.path.join(self.folder_path, "object_sdata.zarr"),
