@@ -3,7 +3,7 @@ from typing import Iterable, Mapping, Sequence, Set, Tuple
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QStandardItem, QStandardItemModel
-from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox, QCheckBox
+from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox, QCheckBox, QGroupBox, QPushButton, QLineEdit
 
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
@@ -186,3 +186,41 @@ class ErrorMessageBox(QMessageBox):
         self.setText("An error occurred:")
         self.setInformativeText(message)
         self.setWindowTitle("Error")
+
+class ListeningQLineEdit(QLineEdit):
+    def __init__(self, update_function=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._update_widgets = update_function
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+
+        if self._update_widgets and event.key() in {Qt.Key_Enter, Qt.Key_Return}:
+            self._update_widgets()
+class PrefixGroup(QGroupBox):
+
+    def __init__(self, update_function=None, **kwargs):
+        super().__init__(**kwargs)
+        self.prefix_name = None
+        self._update_widgets = update_function
+        self.setTitle("Prefix")
+
+        self.prefix_button = QPushButton("confirm prefix")
+        self.prefix_button.clicked.connect(self._select_prefix)
+
+        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
+        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
+
+        prefix_layout = QVBoxLayout()
+        prefix_layout.addWidget(self.prefix_line_edit)
+        prefix_layout.addWidget(self.prefix_button)
+        self.setLayout(prefix_layout)
+
+    def _select_prefix(self):
+        self.prefix_name = self.prefix_line_edit.text()
+        if self._update_widgets:
+            self._update_widgets()
+
+    def setEnabled(self, condition):
+        self.prefix_button.setEnabled(condition)
+        self.prefix_line_edit.setEnabled(condition)

@@ -1,3 +1,5 @@
+import dask
+dask.config.set({'dataframe.query-planning': False})
 import dask.dataframe as dd
 import dask.array as da
 import joblib
@@ -7,6 +9,7 @@ import xarray as xa
 import numpy as np
 import sparse
 
+from enum import StrEnum
 from dask.distributed import Client
 from functools import reduce
 from harpy.utils._aggregate import RasterAggregator
@@ -194,10 +197,10 @@ class Pixel_Classifier:
             labels = labels.squeeze(0)
 
         if not isinstance(features, FilterSet):
-            raise TypeError("The argument [labels] has the wrong data type. Please pass a FilterSet")
+            raise TypeError("The argument [features] has the wrong data type. Please pass a FilterSet")
 
         if not isinstance(prefix, str):
-            raise TypeError("The argument [labels] has the wrong data type. Please pass a str")
+            raise TypeError("The argument [prefix] has the wrong data type. Please pass a str")
 
         if prefix.isspace() or prefix=="":
             raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
@@ -222,8 +225,7 @@ class Pixel_Classifier:
                 labels=labels,
                 model_path=os.path.join(
                     self.output_folder, self.MODEL_NAME
-                ),  # path to trained model
-                # kwargs passed to client
+                ),
                 processes=False,
                 n_workers=1,
                 threads_per_worker=10,
@@ -234,7 +236,7 @@ class Pixel_Classifier:
 
         logger.info("PIXEL CLASSIFICATION: starting classification")
         results = self.pixel_classification(
-            image=data,  # pass the preprocessed data
+            image=data,
             clf=clf,
             processes=False,
             n_workers=1,
@@ -256,9 +258,6 @@ class Pixel_Classifier:
         return self._workflow(image, labels, features, prefix, to_train, overwrite)
 
 class Object_Classifier:
-    MASK_NAME = "masks_whole"
-    ANNOTATIONS_NAME = "annotation"
-    ALL_STATISTICAL_FUNCTIONS = ("sum", "mean", "count", "var", "kurtosis", "skew")
     MODEL_NAME = "object_model.pkl"
 
     def __init__(
@@ -274,26 +273,37 @@ class Object_Classifier:
         self,
         mask: da.Array,
         image: da.Array,
-        stats:tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
+        stats:tuple["Statistical_Functions"],
     ) -> dd.DataFrame:
         # feature extraction
         mask = mask[None, ...]
-
-        print(stats)
 
         if mask.chunksize != image.chunksize[1:]:
             logger.warning("Mask chunks and image chunks are not the same. Changing mask chunks...")
             mask = mask.rechunk(image.chunksize[1:])
 
         aggregator=RasterAggregator(mask_dask_array=mask, image_dask_array=image)
-        features=aggregator.aggregate_stats(stats_funcs=stats)
+        single_stats = Statistical_Functions.get_single_stats(stats)
+        features=dict(zip(single_stats,aggregator.aggregate_stats(stats_funcs=single_stats)))
 
-        for index in range(len(stats)):
-            prefix = stats[index]+"_"
-            feature = features[index]
-            feature.columns = [f"{prefix}{c}" if f"{c}".isdigit() else c for c in feature.columns]
+        if Statistical_Functions.QUANTILES in stats:
+            quantiles = aggregator.aggregate_quantiles(100)
 
-        res = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), features)
+            for i in range(len(quantiles)):
+                quantile = quantiles[i]
+                quantile.columns = [f"{i}_{c}" if c!='cell_ID' else c for c in quantile.columns]
+
+            features[Statistical_Functions.QUANTILES.value] = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), quantiles)
+
+        if Statistical_Functions.RADII_AND_AXES_MASK in stats:
+            features[Statistical_Functions.RADII_AND_AXES_MASK.value] = aggregator.aggregate_radii_and_axes(100)
+
+
+        for key, feature in features.items():
+            prefix = key+"_"
+            feature.columns = [f"{prefix}{c}" if c!='cell_ID' else c for c in feature.columns]
+
+        res = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), list(features.values()))
         res = res.loc[res['cell_ID']!=0]
 
         return res
@@ -302,17 +312,18 @@ class Object_Classifier:
         self,
         X_train: dd.DataFrame,
         y_train: dd.DataFrame,
+        prefix: str,
     ) -> None:
         clf = RandomForestClassifier(n_estimators=100, random_state=42)
         clf.fit(X_train, y_train)
 
-        joblib.dump(clf, os.path.join(self.output_folder, self.MODEL_NAME))
+        joblib.dump(clf, os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
 
     def object_classification(
         self,
         X: dd.DataFrame,
+        clf,
     ) -> np.ndarray:
-        clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, self.MODEL_NAME))
         return clf.predict(X)
 
     def object_classifier_workflow(
@@ -320,7 +331,8 @@ class Object_Classifier:
         mask: da.Array | np.ndarray | xa.DataArray,
         images: da.Array | np.ndarray | xa.DataArray,
         annotation: da.Array | np.ndarray | xa.DataArray,
-        statistical_functions: tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
+        statistical_functions: tuple["Statistical_Functions"],
+        prefix: str,
     ) -> da.Array:
 
         # check arguments if they have the write datatype and converts if possible
@@ -344,17 +356,23 @@ class Object_Classifier:
         X_train = X_train.drop("cell_ID", axis=1)
 
         logger.info("OBJECT CLASSIFICATION: starting training")
-        self.object_training(X_train, annotation)
+        self.object_training(X_train, annotation, prefix)
 
         logger.info("OBJECT CLASSIFICATION: starting classification")
-        y_pred_all = self.object_classification(features.drop( [ "cell_ID" ], axis=1 ))
+        clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
+        y_pred_all = self.object_classification(features.drop( [ "cell_ID" ], axis=1 ), clf)
 
         cell_ids=features[ "cell_ID" ]
 
         assert cell_ids.shape == y_pred_all.shape
 
         max_id = cell_ids.max()
-        lookup = np.zeros(max_id + 1, dtype=y_pred_all.dtype)
+
+        dtype = np.int8
+        if len(np.unique(y_pred_all))>255:
+            dtype = np.int16
+        lookup = np.zeros(max_id + 1, dtype=dtype)
+
         lookup[cell_ids] = y_pred_all
         return da.take(lookup, mask)
 
@@ -364,11 +382,41 @@ class Object_Classifier:
         mask: da.Array | np.ndarray | xa.DataArray,
         images: list[da.Array] | list[np.ndarray] | list[xa.DataArray],
         annotation: da.Array | np.ndarray | xa.DataArray,
-        statistical_functions: tuple[str] = ("sum", "mean", "count", "var", "kurtosis", "skew"),
+        statistical_functions: tuple["Statistical_Functions"],
+        prefix: str,
     ) -> da.Array:
-        return self.object_classifier_workflow(mask, images, annotation, statistical_functions)
+        return self.object_classifier_workflow(mask, images, annotation, statistical_functions, prefix)
 
 class InvalidPrefixError(Exception):
 
     def __init__(self,*args):
         super().__init__(*args)
+
+class Statistical_Functions(StrEnum):
+    SUM = "sum"
+    MEAN = "mean"
+    COUNT = "count"
+    VAR = "var"
+    KURTOSIS = "kurtosis"
+    SKEW = "skew"
+    QUANTILES = "quantiles"
+    RADII_AND_AXES_MASK = "axes_mask"
+
+    @staticmethod
+    def get_values(args: list[StrEnum]) -> list[str]:
+        return [stat.value for stat in args]
+
+    @staticmethod
+    def get_single_stats(stats: list[StrEnum]) -> list[str]:
+        aggregate_stats = {Statistical_Functions.SUM,
+                    Statistical_Functions.MEAN,
+                    Statistical_Functions.COUNT,
+                    Statistical_Functions.VAR,
+                    Statistical_Functions.KURTOSIS,
+                    Statistical_Functions.SKEW}
+        result = []
+        for stat in stats:
+            if stat in aggregate_stats:
+                result.append(stat.value)
+
+        return result

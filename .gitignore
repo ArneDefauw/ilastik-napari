@@ -10,3 +10,5 @@ notebooks/*
 
 !notebooks/dask_pipelines.ipynb
 !notebooks/object_classification_workflow.ipynb
+
+.env

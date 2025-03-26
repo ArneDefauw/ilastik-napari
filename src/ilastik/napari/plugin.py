@@ -4,7 +4,6 @@ import dask.array as da
 import xarray as xa
 import loguru
 import numpy as np
-from napari_spatialdata import Interactive
 from spatialdata import get_pyramid_levels
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtCore import QModelIndex, QSortFilterProxyModel, Qt
@@ -32,11 +31,11 @@ from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
 from ilastik.napari.filters import FilterSet, EmptyFilterListError
-from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog
+from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog, PrefixGroup
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer
-from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, InvalidPrefixError
+from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, InvalidPrefixError, Statistical_Functions
 
 logger = loguru.logger
 
@@ -85,16 +84,12 @@ def add_or_update_layer(data:xa.DataArray|xa.DataTree, viewer:Viewer, params:dic
         data = [i.data for i in get_pyramid_levels(data)]
         to_scale = True
 
-    try:
-        layer = viewer.layers[params["name"]]
-        layer.data = data
-    except KeyError:
-        if type=="labels":
-            layer = viewer.add_labels(data, multiscale=to_scale, **params)
-            layer.color_mode = "AUTO"
-            layer.editable = False
-        elif type=="image":
-            layer = viewer.add_image(data, multiscale=to_scale, **params)
+    if type=="labels":
+        layer = viewer.add_labels(data, multiscale=to_scale, **params)
+        layer.color_mode = "AUTO"
+        layer.editable = False
+    elif type=="image":
+        layer = viewer.add_image(data, multiscale=to_scale, **params)
 
 def check_and_convert_multilayer(input):
     if input.multiscale:
@@ -257,18 +252,7 @@ class PixelClassificationWidget(QWidget):
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
-        prefix_group = QGroupBox("Prefix")
-
-        self.prefix_button = QPushButton("confirm prefix")
-        self.prefix_button.clicked.connect(self._select_prefix)
-
-        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
-        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
-
-        prefix_layout = QVBoxLayout()
-        prefix_layout.addWidget(self.prefix_line_edit)
-        prefix_layout.addWidget(self.prefix_button)
-        prefix_group.setLayout(prefix_layout)
+        self.prefix_group = PrefixGroup(update_function=self._update_widgets)
 
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
@@ -276,7 +260,7 @@ class PixelClassificationWidget(QWidget):
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(prefix_group)
+        output_file_layout.addWidget(self.prefix_group)
         output_file_layout.addWidget(self.overwrite)
         output_file_group.setLayout(output_file_layout)
 
@@ -302,6 +286,7 @@ class PixelClassificationWidget(QWidget):
 
     def _update_widgets(self):
         # For image list, check that at least one item is selected.
+        self.prefix_name = self.prefix_group.prefix_name
         output_buttons = (self._segmentation_button, self._probabilities_button)
         self._run_button.setEnabled(
             len(self._image_list.selectedItems()) > 0
@@ -310,12 +295,10 @@ class PixelClassificationWidget(QWidget):
             and bool(self.folder_path)
             and bool(self.prefix_name)
         )
-        self.prefix_button.setEnabled(bool(self.folder_path))
-        self.prefix_line_edit.setEnabled(bool(self.folder_path))
+        self.prefix_group.setEnabled(bool(self.folder_path))
         self.folder_label.setText(
             self.folder_path if self.folder_path else "No folder selected"
         )
-        self.prefix_line_edit.setText(self.prefix_name)
 
     def _update_image_list(self, event=None):
         self._image_list.clear()
@@ -391,6 +374,7 @@ class PixelClassificationWidget(QWidget):
     def _set_enabled(self, value):
         self._run_button.setEnabled(value)
         self._progress_bar.setVisible(not value)
+        self._update_widgets()
 
     def _update_output_layers(self, proba):
         # TODO: make this pyramid, and add it as such to the napari viewer
@@ -442,6 +426,8 @@ class ObjectClassificationWidget(QWidget):
 
         self.folder_path = None
 
+        self.prefix_name = None
+
         self._viewer = napari_viewer
         layer_model = napari_viewer.layers
 
@@ -464,7 +450,7 @@ class ObjectClassificationWidget(QWidget):
         mask_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
         self.mask_combo = mask_combo
 
-        self.stat_func = CheckboxDialog(Object_Classifier.ALL_STATISTICAL_FUNCTIONS, True, parent=self)
+        self.stat_func = CheckboxDialog([i for i in Statistical_Functions], True, parent=self)
         stat_button = QPushButton("Statistical Functions")
         stat_button.clicked.connect(self.stat_func.open)
 
@@ -488,12 +474,15 @@ class ObjectClassificationWidget(QWidget):
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
+        self.prefix_group = PrefixGroup(update_function=self._update_widgets)
+
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
 
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
+        output_file_layout.addWidget(self.prefix_group)
         output_file_layout.addWidget(self.overwrite)
         output_file_group.setLayout(output_file_layout)
 
@@ -511,14 +500,17 @@ class ObjectClassificationWidget(QWidget):
 
     def _update_widgets(self):
         # For image list, check that at least one item is selected.
+        self.prefix_name = self.prefix_group.prefix_name
         self.run_button.setEnabled(
             len(self._image_list.selectedItems()) > 0
             and all(c.currentData() for c in (self.annotation_combo, self.mask_combo))
             and bool(self.folder_path)
+            and bool(self.prefix_name)
         )
         self.folder_label.setText(
             self.folder_path if self.folder_path else "No folder selected"
         )
+        self.prefix_group.setEnabled(bool(self.folder_path))
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
@@ -560,6 +552,7 @@ class ObjectClassificationWidget(QWidget):
             image,
             annotation_layer.data,
             self.stat_func.get_stat_functions(),
+            self.prefix_name,
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -611,16 +604,18 @@ class IlastikWidget(QWidget):
         self.tabs = QTabWidget()
 
         # Add pixel classification widget
+        self.pixelClassifier = PixelClassificationWidget(viewer)
         self.tab1 = QWidget()
         self.tab1_layout = QVBoxLayout()
-        self.tab1_layout.addWidget(PixelClassificationWidget(viewer))
+        self.tab1_layout.addWidget(self.pixelClassifier)
         self.tab1.setLayout(self.tab1_layout)
         self.tabs.addTab(self.tab1, "pixel")
 
         #  Add Object classification widget
+        self.objectClassifier = ObjectClassificationWidget(viewer)
         self.tab2 = QWidget()
         self.tab2_layout = QVBoxLayout()
-        self.tab2_layout.addWidget(ObjectClassificationWidget(viewer))
+        self.tab2_layout.addWidget(self.objectClassifier)
         self.tab2.setLayout(self.tab2_layout)
         self.tabs.addTab(self.tab2, "object")
 
