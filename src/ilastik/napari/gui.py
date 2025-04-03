@@ -3,8 +3,20 @@ from typing import Iterable, Mapping, Sequence, Set, Tuple
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QStandardItem, QStandardItemModel
-from qtpy.QtWidgets import QDialog, QDialogButtonBox, QTableView, QVBoxLayout, QMessageBox, QCheckBox, QGroupBox, QPushButton, QLineEdit
-
+from qtpy.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QTableView,
+    QVBoxLayout,
+    QMessageBox,
+    QCheckBox,
+    QGroupBox,
+    QPushButton,
+    QLineEdit,
+    QLabel,
+    QSizePolicy,
+    QFileDialog
+)
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
     """Yield pairs of (row, column) indices."""
@@ -224,3 +236,70 @@ class PrefixGroup(QGroupBox):
     def setEnabled(self, condition):
         self.prefix_button.setEnabled(condition)
         self.prefix_line_edit.setEnabled(condition)
+
+class FileOutputGroup(QGroupBox):
+
+    def __init__(self, classifier_controler, update_function=None, **kwargs):
+        super().__init__(**kwargs)
+
+        self.classifier_controler = classifier_controler
+        self._update_other_widgets = update_function
+
+        self.setTitle("Output folder")
+
+        folder_button = QPushButton("select folder")
+        folder_button.clicked.connect(self._select_folder)
+
+        self.folder_label = QLabel()
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+
+        self.prefix_group = QGroupBox("Prefix")
+
+        self.prefix_button = QPushButton("confirm prefix")
+        self.prefix_button.clicked.connect(self._select_prefix)
+
+        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
+        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
+
+        prefix_layout = QVBoxLayout()
+        prefix_layout.addWidget(self.prefix_line_edit)
+        prefix_layout.addWidget(self.prefix_button)
+        self.prefix_group.setLayout(prefix_layout)
+
+        self.overwrite = QCheckBox("overwrite")
+        self.overwrite.setChecked(False)
+
+        output_file_layout = QVBoxLayout()
+        output_file_layout.addWidget(folder_button)
+        output_file_layout.addWidget(self.folder_label)
+        output_file_layout.addWidget(self.prefix_group)
+        output_file_layout.addWidget(self.overwrite)
+        self.setLayout(output_file_layout)
+
+    def _update_widgets(self):
+        self._setEnabled(bool(self.classifier_controler.folder_path))
+        self.folder_label.setText(
+            self.classifier_controler.folder_path if self.classifier_controler.folder_path else "No folder selected"
+        )
+
+        if self._update_other_widgets:
+            self._update_other_widgets()
+
+    def _select_prefix(self):
+        self.classifier_controler.prefix_name = self.prefix_line_edit.text()
+
+        self._update_widgets()
+
+    def _setEnabled(self, condition):
+        self.prefix_button.setEnabled(condition)
+        self.prefix_line_edit.setEnabled(condition)
+
+    def _select_folder(self):
+        folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
+        if folder_path is not None:
+            self.classifier_controler.folder_path = folder_path
+
+        self.classifier_controler.prefix_name = ""
+
+        self._update_widgets()

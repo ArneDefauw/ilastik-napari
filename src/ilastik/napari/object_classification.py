@@ -1,5 +1,4 @@
 import dask
-dask.config.set({'dataframe.query-planning': False})
 import dask.dataframe as dd
 import dask.array as da
 import joblib
@@ -7,7 +6,6 @@ import os
 import loguru
 import xarray as xa
 import numpy as np
-import sparse
 
 from enum import StrEnum
 from dask.distributed import Client
@@ -16,9 +14,11 @@ from harpy.utils._aggregate import RasterAggregator
 from sklearn.ensemble import RandomForestClassifier
 from ilastik.napari.filters import FilterSet
 from sklearn.pipeline import Pipeline
-from ilastik.napari.classifier import NDSparseDaskClassifier, NDSparseClassifier
+from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
+
+dask.config.set({'dataframe.query-planning': False})
 
 logger = loguru.logger
 
@@ -40,20 +40,6 @@ def check_folder_argument(
         raise TypeError("The argument [output_folder] has the wrong data type. Please pass a [str] instead.")
     if not os.path.isdir(output_folder):
         raise NotADirectoryError(f"The given path: {output_folder} for argument [output_folder] is not a directory. Please pass a valid one.")
-
-
-@thread_worker
-def _pixel_classification(image, labels, features):
-    feature_map = features.transform(np.asarray(image.data))
-    sparse_labels = sparse.COO.from_numpy(np.asarray(labels.data))
-
-    clf = NDSparseClassifier(RandomForestClassifier())
-    clf.fit(feature_map, sparse_labels)
-    res = clf.predict_proba(feature_map)
-
-    out = np.moveaxis(res, -1, 0)
-
-    return out
 
 class Pixel_Classifier:
     PREPROCESSED_ARRAY_NAME = "preprocessed_array.zarr"
@@ -340,9 +326,21 @@ class Object_Classifier:
 
         if len(annotation.shape)>2:
             annotation = annotation.squeeze()
-        annotation = check_and_convert_arrays_to_dask(annotation)
 
         images = check_and_convert_arrays_to_dask(images)
+
+        annotation = check_and_convert_arrays_to_dask(annotation)
+
+        check_folder_argument(self.output_folder)
+
+        if not isinstance(prefix, str):
+            raise TypeError("The argument [prefix] has the wrong data type. Please pass a str")
+
+        if prefix.isspace() or prefix=="":
+            raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
+
+        if np.unique(annotation.compute()).size<3:
+            raise InvalidAnnotationsArray("Annotations must contain more than 3 unique values")
 
         # start workflow
         images=images[ :, None, ... ]
@@ -390,6 +388,11 @@ class Object_Classifier:
 class InvalidPrefixError(Exception):
 
     def __init__(self,*args):
+        super().__init__(*args)
+
+class InvalidAnnotationsArray(Exception):
+
+    def __init__(self, *args):
         super().__init__(*args)
 
 class Statistical_Functions(StrEnum):
