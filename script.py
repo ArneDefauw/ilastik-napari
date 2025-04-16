@@ -13,6 +13,6 @@ debugpy.wait_for_client()  # Optional: only proceed once the debugger is attache
 viewer = napari.Viewer()
 viewer.window.add_plugin_dock_widget("ilastik-napari")
 # sdata = read_zarr("/Users/arnedf/VIB/DATA/test_data_ilastik/sdata_transcriptomics.zarr")
-sdata = read_zarr(r"C:\Users\matti\Documents\WERK\STAGE\VIB\data\ilastik_example_data\example.zarr")
+sdata = read_zarr(r"C:\Users\matti\Documents\WERK\STAGE\VIB\data\ilastik_example_data\example_not_multiscaled.zarr")
 Interactive(sdata)
 napari.run()

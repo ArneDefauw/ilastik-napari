@@ -17,14 +17,40 @@ from sklearn.pipeline import Pipeline
 from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
+from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, DepthTooLarge
 
 dask.config.set({'dataframe.query-planning': False})
 
 logger = loguru.logger
 
+def list_tuple_splitter(x):
+    a = []
+    b = []
+
+    for tup in x:
+        a.append(tup[0])
+        b.append(tup[1])
+
+    return a, b
+
 def check_and_convert_arrays_to_dask(
         argument
     ) -> da.Array:
+    """
+        Checks the data type of an array and converts it to a dask.array.Array if possible.
+
+        Parameters
+        ----------
+        argument: Any input
+
+        Return
+        ------
+        dask.array.Array: a dask array of the input.
+
+        Raise
+        -----
+        TypeError: if the input is a invalid datatype then raise.
+    """
     if isinstance(argument, np.ndarray):
         return da.from_array(argument)
     elif isinstance(argument, xa.DataArray):
@@ -42,6 +68,28 @@ def check_folder_argument(
         raise NotADirectoryError(f"The given path: {output_folder} for argument [output_folder] is not a directory. Please pass a valid one.")
 
 class Pixel_Classifier:
+    """
+        The class that manages the pixel classification.
+
+        Constants
+        ---------
+        PREPROCESSED_ARRAY_NAME (str): Base name of the preprocessed array file.
+
+        PREPROCESSING_PIPE_NAME (str): Base name of the preprocessings pipline file.
+
+        MODEL_NAME (str): base name of the model file.
+
+        Attributes
+        ----------
+        output_folder (str): Path to the output folder
+
+        Methodes
+        --------
+        preprocessing()
+            makes the
+
+
+    """
     PREPROCESSED_ARRAY_NAME = "preprocessed_array.zarr"
     PREPROCESSING_PIPE_NAME = "preprocessing_pipe.pkl"
     MODEL_NAME = "model.pkl"
@@ -245,6 +293,7 @@ class Pixel_Classifier:
 
 class Object_Classifier:
     MODEL_NAME = "object_model.pkl"
+    ID_COLUMN_NAME = 'cell_ID'
 
     def __init__(
         self,
@@ -258,39 +307,54 @@ class Object_Classifier:
     def feature_extractor(
         self,
         mask: da.Array,
-        image: da.Array,
+        images: list[tuple[str, da.Array]],
         stats:tuple["Statistical_Functions"],
+        depth:int,
     ) -> dd.DataFrame:
         # feature extraction
         mask = mask[None, ...]
 
+        names, images = list_tuple_splitter(images)
+
+        image = da.concatenate(images)
+        image=image[ :, None, ... ]
+
         if mask.chunksize != image.chunksize[1:]:
-            logger.warning("Mask chunks and image chunks are not the same. Changing mask chunks...")
             mask = mask.rechunk(image.chunksize[1:])
+
+        features = []
 
         aggregator=RasterAggregator(mask_dask_array=mask, image_dask_array=image)
         single_stats = Statistical_Functions.get_single_stats(stats)
-        features=dict(zip(single_stats,aggregator.aggregate_stats(stats_funcs=single_stats)))
 
-        if Statistical_Functions.QUANTILES in stats:
-            quantiles = aggregator.aggregate_quantiles(100)
+        if single_stats:
+            single_features=aggregator.aggregate_stats(stats_funcs=single_stats)
 
-            for i in range(len(quantiles)):
-                quantile = quantiles[i]
-                quantile.columns = [f"{i}_{c}" if c!='cell_ID' else c for c in quantile.columns]
+            for key, feature in zip(single_stats, single_features):
+                prefix = key
+                feature.columns = [c if c==Object_Classifier.ID_COLUMN_NAME else f"{prefix} {names[c]}" for c in feature.columns]
 
-            features[Statistical_Functions.QUANTILES.value] = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), quantiles)
+            features.extend(single_features)
 
-        if Statistical_Functions.RADII_AND_AXES_MASK in stats:
-            features[Statistical_Functions.RADII_AND_AXES_MASK.value] = aggregator.aggregate_radii_and_axes(100)
+        try:
+            if Statistical_Functions.QUANTILES in stats:
+                quantiles = aggregator.aggregate_quantiles(depth)
 
+                for i in range(len(quantiles)):
+                    quantile = quantiles[i]
+                    quantile.columns = [f"{Statistical_Functions.QUANTILES}_{i} {names[c]}" if c!=Object_Classifier.ID_COLUMN_NAME else c for c in quantile.columns]
 
-        for key, feature in features.items():
-            prefix = key+"_"
-            feature.columns = [f"{prefix}{c}" if c!='cell_ID' else c for c in feature.columns]
+                features.append(reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), quantiles))
 
-        res = reduce(lambda left, right: dd.merge(left, right, on='cell_ID', how='outer'), list(features.values()))
-        res = res.loc[res['cell_ID']!=0]
+            if Statistical_Functions.RADII_AND_AXES_MASK in stats:
+                rna = aggregator.aggregate_radii_and_axes(depth)
+                rna.columns = [f"{Statistical_Functions.RADII_AND_AXES_MASK}_{c}" if c!=Object_Classifier.ID_COLUMN_NAME else c for c in rna.columns]
+                features.append(rna)
+        except ValueError as e:
+            raise DepthTooLarge(e)
+
+        res = reduce(lambda left, right: dd.merge(left, right, on=Object_Classifier.ID_COLUMN_NAME, how='outer'), features)
+        res = res.loc[res[Object_Classifier.ID_COLUMN_NAME]!=0]
 
         return res
 
@@ -315,10 +379,12 @@ class Object_Classifier:
     def object_classifier_workflow(
         self,
         mask: da.Array | np.ndarray | xa.DataArray,
-        images: da.Array | np.ndarray | xa.DataArray,
+        images: list[tuple[str, da.Array | np.ndarray | xa.DataArray]],
         annotation: da.Array | np.ndarray | xa.DataArray,
         statistical_functions: tuple["Statistical_Functions"],
+        depth:int,
         prefix: str,
+        to_train=True,
     ) -> da.Array:
 
         # check arguments if they have the write datatype and converts if possible
@@ -327,7 +393,7 @@ class Object_Classifier:
         if len(annotation.shape)>2:
             annotation = annotation.squeeze()
 
-        images = check_and_convert_arrays_to_dask(images)
+        images = [(i[0], check_and_convert_arrays_to_dask(i[1])) for i in images]
 
         annotation = check_and_convert_arrays_to_dask(annotation)
 
@@ -343,24 +409,23 @@ class Object_Classifier:
             raise InvalidAnnotationsArray("Annotations must contain more than 3 unique values")
 
         # start workflow
-        images=images[ :, None, ... ]
-
         logger.info("OBJECT CLASSIFICATION: extracting features")
-        features = self.feature_extractor(mask, images, statistical_functions)
+        features = self.feature_extractor(mask, images, statistical_functions, depth)
 
         annotated_cells_id, annotation=get_annotation( array_1=annotation, array_2=mask)
 
-        X_train=features[ features[ "cell_ID" ].isin( annotated_cells_id )]
-        X_train = X_train.drop("cell_ID", axis=1)
+        X_train=features[ features[self.ID_COLUMN_NAME].isin( annotated_cells_id )]
+        X_train = X_train.drop(self.ID_COLUMN_NAME, axis=1)
 
-        logger.info("OBJECT CLASSIFICATION: starting training")
-        self.object_training(X_train, annotation, prefix)
+        if to_train:
+            logger.info("OBJECT CLASSIFICATION: starting training")
+            self.object_training(X_train, annotation, prefix)
 
         logger.info("OBJECT CLASSIFICATION: starting classification")
         clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
-        y_pred_all = self.object_classification(features.drop( [ "cell_ID" ], axis=1 ), clf)
+        y_pred_all = self.object_classification(features.drop( [self.ID_COLUMN_NAME], axis=1 ), clf)
 
-        cell_ids=features[ "cell_ID" ]
+        cell_ids=features[self.ID_COLUMN_NAME]
 
         assert cell_ids.shape == y_pred_all.shape
 
@@ -385,15 +450,6 @@ class Object_Classifier:
     ) -> da.Array:
         return self.object_classifier_workflow(mask, images, annotation, statistical_functions, prefix)
 
-class InvalidPrefixError(Exception):
-
-    def __init__(self,*args):
-        super().__init__(*args)
-
-class InvalidAnnotationsArray(Exception):
-
-    def __init__(self, *args):
-        super().__init__(*args)
 
 class Statistical_Functions(StrEnum):
     SUM = "sum"

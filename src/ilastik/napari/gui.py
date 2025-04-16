@@ -2,7 +2,7 @@ import collections.abc
 from typing import Iterable, Mapping, Sequence, Set, Tuple
 
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QStandardItem, QStandardItemModel
+from qtpy.QtGui import QStandardItem, QStandardItemModel, QIntValidator
 from qtpy.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -15,7 +15,9 @@ from qtpy.QtWidgets import (
     QLineEdit,
     QLabel,
     QSizePolicy,
-    QFileDialog
+    QFileDialog,
+    QListWidget,
+    QHBoxLayout
 )
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
@@ -134,14 +136,26 @@ class CheckboxTableDialog(QDialog):
         self._update_widgets()
 
 class StoredQCheckbox(QCheckBox):
-    def __init__(self, item, *, parent=None, update_function=None):
+    def __init__(self, item, parent=None, update_function=None, **kwargs):
         super().__init__(parent)
         self.setText(item)
         self.item = item
         if update_function:
             self.stateChanged.connect(update_function)
+
+class NumberLineEdit(QLineEdit):
+    def __init__(self, default, parent=None):
+        super().__init__(parent)
+        validator = QIntValidator(0, 2147483647)
+        self.setValidator(validator)
+
+        self.setText(default)
+
+    def get_value(self):
+        return int(self.text())
+
 class CheckboxDialog(QDialog):
-    def __init__(self, item_list, default=True, *, parent=None):
+    def __init__(self, item_list, default=True, parent=None):
         super().__init__(parent)
 
         stat_layout = QVBoxLayout()
@@ -152,6 +166,14 @@ class CheckboxDialog(QDialog):
             checkbox = StoredQCheckbox(i, update_function=self._update_widgets)
             stat_layout.addWidget(checkbox)
             self.stats.append(checkbox)
+
+        self.depth_label = NumberLineEdit("100")
+        depth_layout = QHBoxLayout()
+        label = QLabel("Depth:")
+        depth_layout.addWidget(label)
+        depth_layout.addWidget(self.depth_label)
+
+        stat_layout.addLayout(depth_layout)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -179,6 +201,9 @@ class CheckboxDialog(QDialog):
             if i.isChecked():
                 result.append(i.item)
         return result
+
+    def get_depth(self):
+        return self.depth_label.get_value()
 
     def _update_widgets(self):
         self._ok_button.setEnabled(any([i.isChecked() for i in self.stats]))
@@ -209,33 +234,16 @@ class ListeningQLineEdit(QLineEdit):
 
         if self._update_widgets and event.key() in {Qt.Key_Enter, Qt.Key_Return}:
             self._update_widgets()
-class PrefixGroup(QGroupBox):
 
-    def __init__(self, update_function=None, **kwargs):
-        super().__init__(**kwargs)
-        self.prefix_name = None
+class ImageViewQListWidget(QListWidget):
+    def __init__(self, update_function=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self._update_widgets = update_function
-        self.setTitle("Prefix")
 
-        self.prefix_button = QPushButton("confirm prefix")
-        self.prefix_button.clicked.connect(self._select_prefix)
-
-        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
-        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
-
-        prefix_layout = QVBoxLayout()
-        prefix_layout.addWidget(self.prefix_line_edit)
-        prefix_layout.addWidget(self.prefix_button)
-        self.setLayout(prefix_layout)
-
-    def _select_prefix(self):
-        self.prefix_name = self.prefix_line_edit.text()
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
         if self._update_widgets:
             self._update_widgets()
-
-    def setEnabled(self, condition):
-        self.prefix_button.setEnabled(condition)
-        self.prefix_line_edit.setEnabled(condition)
 
 class FileOutputGroup(QGroupBox):
 
@@ -278,28 +286,29 @@ class FileOutputGroup(QGroupBox):
         self.setLayout(output_file_layout)
 
     def _update_widgets(self):
-        self._setEnabled(bool(self.classifier_controler.folder_path))
+        self.prefix_group.setEnabled(bool(self.classifier_controler.folder_path))
         self.folder_label.setText(
             self.classifier_controler.folder_path if self.classifier_controler.folder_path else "No folder selected"
         )
+        self.prefix_line_edit.setText(self.classifier_controler.prefix_name)
+        self.setEnabled(bool(self.classifier_controler.folder_path))
 
-        if self._update_other_widgets:
-            self._update_other_widgets()
-
-    def _select_prefix(self):
-        self.classifier_controler.prefix_name = self.prefix_line_edit.text()
-
-        self._update_widgets()
-
-    def _setEnabled(self, condition):
-        self.prefix_button.setEnabled(condition)
-        self.prefix_line_edit.setEnabled(condition)
+        self.classifier_controler.overwrite = self.overwrite.isChecked()
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
         if folder_path is not None:
             self.classifier_controler.folder_path = folder_path
 
-        self.classifier_controler.prefix_name = ""
+        self.classifier_controler.prefix_name = None
 
         self._update_widgets()
+
+    def setEnabled(self, condition):
+        self.prefix_button.setEnabled(condition)
+        self.prefix_line_edit.setEnabled(condition)
+
+    def _select_prefix(self):
+        self.classifier_controler.prefix_name = self.prefix_line_edit.text()
+        if self._update_other_widgets:
+            self._update_other_widgets()

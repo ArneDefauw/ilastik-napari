@@ -15,13 +15,9 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
-    QLabel,
-    QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QProgressBar,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
     QTabWidget,
@@ -32,11 +28,12 @@ from spatialdata.models import Image2DModel, Labels2DModel
 
 from ilastik.napari import filters
 from ilastik.napari.filters import FilterSet, EmptyFilterListError
-from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog, PrefixGroup
+from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog, FileOutputGroup, ImageViewQListWidget
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer, Shapes
-from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, InvalidPrefixError, Statistical_Functions, InvalidAnnotationsArray
+from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, Statistical_Functions
+from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, TooManyRectangles, DepthTooLarge
 
 logger = loguru.logger
 
@@ -85,6 +82,7 @@ def add_layer(data:xa.DataArray|xa.DataTree, viewer:Viewer, params:dict, type:st
         else:
             data = pyramid[0]
 
+    print(data)
     if type=="labels":
         layer = viewer.add_labels(data, multiscale=to_scale, **params)
         layer.color_mode = "direct"
@@ -114,7 +112,9 @@ def thread_handler(exec:Exception):
         FileExistsError: ErrorMessageBox("File already exists, please change the folder path or check the overwrite option."),
         NotADirectoryError: ErrorMessageBox("The given folder does not exist"),
         EmptyFilterListError: ErrorMessageBox("No filters has been passed"),
-        InvalidAnnotationsArray: ErrorMessageBox("less than two annotations have been passed. You must have two or more labels to run.")
+        InvalidAnnotationsArray: ErrorMessageBox("less than two annotations have been passed. You must have two or more labels to run."),
+        TooManyRectangles: ErrorMessageBox("Too many rectangles has been passed in the shapes layer. Please pass one rectangle"),
+        DepthTooLarge: ErrorMessageBox("Given Depth is too large. It needs to be smaller than the image size.")
     }
 
     default_error_box = ErrorMessageBox("Something went wrong, check log.")
@@ -165,28 +165,6 @@ class LabelsLayerModel(LayerModel):
 class ShapesLayerModel(LayerModel):
     def should_accept_layer(self, layer: Layer) -> bool:
         return isinstance(layer, Shapes) and not isinstance(layer, Labels)
-
-class ImageViewQListWidget(QListWidget):
-    def __init__(self, update_function=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._update_widgets = update_function
-
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        if self._update_widgets:
-            self._update_widgets()
-
-class ListeningQLineEdit(QLineEdit):
-    def __init__(self, update_function=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._update_widgets = update_function
-
-    def keyPressEvent(self, event):
-        super().keyPressEvent(event)
-
-        if self._update_widgets and event.key() in {Qt.Key_Enter, Qt.Key_Return}:
-            self._update_widgets()
-
 class PixelClassificationWidget(QWidget):
     SEG_LAYER_PARAMS = dict(name="ilastik-segmentation", opacity=1)
     PROBA_LAYER_PARAMS = dict(name="ilastik-probabilities", opacity=0.75)
@@ -247,33 +225,14 @@ class PixelClassificationWidget(QWidget):
         progress_bar.setMinimum(0)
         progress_bar.setMaximum(0)
 
-        output_file_group = QGroupBox("Output folder")
-
-        folder_button = QPushButton("select folder")
-        folder_button.clicked.connect(self._select_folder)
-
-        self.folder_label = QLabel()
-        self.folder_label.setWordWrap(True)
-        self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-
-        self.prefix_group = PrefixGroup(update_function=self._update_widgets)
-
-        self.overwrite = QCheckBox("overwrite")
-        self.overwrite.setChecked(False)
-
-        output_file_layout = QVBoxLayout()
-        output_file_layout.addWidget(folder_button)
-        output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(self.prefix_group)
-        output_file_layout.addWidget(self.overwrite)
-        output_file_group.setLayout(output_file_layout)
+        self.output_file_group = FileOutputGroup(self.pixelController, self._update_widgets)
 
         layout = QFormLayout()
         layout.addRow("&Image:", self._image_list)
         layout.addRow("&Labels:", labels_combo)
         layout.addRow(features_button)
         layout.addRow(output_type_group)
-        layout.addRow(output_file_group)
+        layout.addRow(self.output_file_group)
         layout.addRow(self.train_checkbox)
         layout.addRow(run_button)
         layout.addRow(progress_bar)
@@ -290,7 +249,6 @@ class PixelClassificationWidget(QWidget):
 
     def _update_widgets(self):
         # For image list, check that at least one item is selected.
-        self.pixelController.prefix_name = self.prefix_group.prefix_name
         output_buttons = (self._segmentation_button, self._probabilities_button)
         self._run_button.setEnabled(
             len(self._image_list.selectedItems()) > 0
@@ -298,10 +256,8 @@ class PixelClassificationWidget(QWidget):
             and any(b.isChecked() for b in output_buttons)
             and self.pixelController.is_runnable()
         )
-        self.prefix_group.setEnabled(bool(self.pixelController.folder_path))
-        self.folder_label.setText(
-            self.pixelController.folder_path if self.pixelController.folder_path else "No folder selected"
-        )
+
+        self.output_file_group._update_widgets()
 
     def _update_image_list(self, event=None):
         self._image_list.clear()
@@ -330,7 +286,6 @@ class PixelClassificationWidget(QWidget):
             labels_layer,  # only support labels layer with one channel dimension
             filters,
             self.train_checkbox.isChecked(),
-            self.overwrite.isChecked(),
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -363,7 +318,7 @@ class PixelClassificationWidget(QWidget):
         proba = proba.astype(np.float16).persist()
 
         # save results in spatialdata object.
-        sdata = self.pixelController.save_data(proba, self._segmentation_button.isChecked(), self._probabilities_button.isChecked(), self.overwrite.isChecked())
+        sdata = self.pixelController.save_data(proba, self._segmentation_button.isChecked(), self._probabilities_button.isChecked())
 
         if self._segmentation_button.isChecked():
             # self._update_seg_layer([i.data for i in get_pyramid_levels(sdata["labels"])
@@ -404,6 +359,9 @@ class ObjectClassificationWidget(QWidget):
         shape_combo.currentIndexChanged.connect(lambda _index: self._update_widgets())
         self.shape_combo = shape_combo
 
+        self.train_checkbox = QCheckBox("Train on data")
+        self.train_checkbox.setChecked(True)
+
         self.stat_func = CheckboxDialog([i for i in Statistical_Functions], True, parent=self)
         stat_button = QPushButton("Statistical Functions")
         stat_button.clicked.connect(self.stat_func.open)
@@ -420,25 +378,7 @@ class ObjectClassificationWidget(QWidget):
 
         self.progress_bar = progress_bar
 
-        output_file_group = QGroupBox("Output folder")
-        folder_button = QPushButton("select folder")
-        folder_button.clicked.connect(self._select_folder)
-
-        self.folder_label = QLabel()
-        self.folder_label.setWordWrap(True)
-        self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-
-        self.prefix_group = PrefixGroup(update_function=self._update_widgets)
-
-        self.overwrite = QCheckBox("overwrite")
-        self.overwrite.setChecked(False)
-
-        output_file_layout = QVBoxLayout()
-        output_file_layout.addWidget(folder_button)
-        output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(self.prefix_group)
-        output_file_layout.addWidget(self.overwrite)
-        output_file_group.setLayout(output_file_layout)
+        self.output_file_group = FileOutputGroup(self.objectController, self._update_widgets)
 
         layout = QFormLayout()
         layout.addRow("&Image:", self._image_list)
@@ -446,7 +386,8 @@ class ObjectClassificationWidget(QWidget):
         layout.addRow("mask:", mask_combo)
         layout.addRow("shape:", shape_combo)
         layout.addRow(stat_button)
-        layout.addRow(output_file_group)
+        layout.addRow(self.output_file_group)
+        layout.addRow(self.train_checkbox)
         layout.addRow(run_button)
         layout.addRow(progress_bar)
         self.setLayout(layout)
@@ -455,24 +396,13 @@ class ObjectClassificationWidget(QWidget):
 
     def _update_widgets(self):
         # For image list, check that at least one item is selected.
-        self.objectController.prefix_name = self.prefix_group.prefix_name
         self.run_button.setEnabled(
             len(self._image_list.selectedItems()) > 0
             and all(c.currentData() for c in (self.annotation_combo, self.mask_combo))
             and self.objectController.is_runnable()
         )
-        self.folder_label.setText(
-            self.objectController.folder_path if self.objectController.folder_path else "No folder selected"
-        )
-        self.prefix_group.setEnabled(bool(self.objectController.folder_path))
 
-    def _select_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
-        if folder_path is not None:
-            self.objectController.folder_path = folder_path
-
-        self._update_widgets()
-
+        self.output_file_group._update_widgets()
 
     def _run_object_classification(self):
         self._set_enabled(False)
@@ -491,6 +421,8 @@ class ObjectClassificationWidget(QWidget):
             annotation_layer,
             shape_layer,
             self.stat_func.get_stat_functions(),
+            self.stat_func.get_depth(),
+            self.train_checkbox.isChecked(),
         )
 
         worker.finished.connect(lambda: self._set_enabled(True))
@@ -516,7 +448,7 @@ class ObjectClassificationWidget(QWidget):
 
     def _update_output_layers(self, proba):
 
-        sdata = self.objectController.save_data(proba, self.overwrite.isChecked())
+        sdata = self.objectController.save_data(proba)
 
         add_layer(sdata['labels'], self._viewer, self.objectController.object_layer_params, "labels")
 
@@ -559,17 +491,19 @@ class ClassificationController:
         self.x_offset = None
         self.y_offset = None
 
+        self.overwrite = False
+
 
     def is_runnable(self)->bool:
         return bool(self.folder_path) and bool(self.prefix_name)
 
 class ObjectClassificationController(ClassificationController):
     SDATA_NAME = "object_sdata.zarr"
-
+    RECTANGLE_STRING = 'rectangle'
 
     def __init__(self):
         super().__init__()
-        self.object_layer_params = dict(name="ilastik-objects", opacity=1)
+        self.object_layer_params = dict(name="ilastik-objects", opacity=1, translate=None)
 
     @thread_worker
     def object_classifier_workflow_thread(
@@ -578,7 +512,9 @@ class ObjectClassificationController(ClassificationController):
         selected_images:list[Image],
         annotion_layer: Labels,
         shape_layer: Shapes,
-        statistical_functions:list[Statistical_Functions]
+        statistical_functions:list[Statistical_Functions],
+        depth:int,
+        to_train=True,
     ) -> da.Array:
         classifier = Object_Classifier(output_folder=self.folder_path)
 
@@ -586,40 +522,44 @@ class ObjectClassificationController(ClassificationController):
 
         self.scale = infer_scales(selected_images, self.scale)
 
-        images = [check_and_convert_multilayer(i) for i in selected_images]
-        image=da.concatenate(images)
+        images = [(i.name, check_and_convert_multilayer(i)) for i in selected_images]
 
         annotions = annotion_layer.data
 
-        print(image)
-        print(annotions.shape)
+        if shape_layer and len(shape_layer.shape_type)!=0:
 
-        if shape_layer:
+            rectangle_indices = [layer for shape, layer in zip(shape_layer.shape_type, shape_layer.data) if shape == self.RECTANGLE_STRING]
 
-            rectangle_index = [l for s, l in zip(shape_layer.shape_type, shape_layer.data) if s == 'rectangle'][0]
+            num_rects = len(rectangle_indices)
 
-            array = rectangle_index.astype(int)
-            a, b = array[0,-2:]
-            c, d, = array[2,-2:]
+            if num_rects!=0:
+                if num_rects>1:
+                    raise TooManyRectangles("Too many rectangles has been passed in the shapes layer.")
+                array = rectangle_indices[0].astype(int)
+                a, b = array[0,-2:]
+                c, d, = array[2,-2:]
 
-            self.object_layer_params["translate"] = [a, b]
+                self.object_layer_params["translate"] = [a, b]
 
-            image = image[...,a:c,b:d]
-            annotions = annotions[...,a:c,b:d]
-            mask = mask[...,a:c,b:d]
+                images = [(i[0], i[1][...,a:c,b:d]) for i in images]
+                annotions = annotions[...,a:c,b:d]
+                mask = mask[...,a:c,b:d]
+            else:
+                logger.warning("No rectangles found in shapes layer. Continuing without it")
+                self.object_layer_params["translate"] = None
 
-            print(image)
-            print(annotions.shape)
+        else:
+            self.object_layer_params["translate"] = None
 
 
-        return classifier.object_classifier_workflow(mask, image, annotions, statistical_functions, self.prefix_name)
+        return classifier.object_classifier_workflow(mask, images, annotions, statistical_functions, depth, self.prefix_name, to_train)
 
-    def save_data(self, proba:da.Array, overwrite=False)->SpatialData:
+    def save_data(self, proba:da.Array)->SpatialData:
         sdata = SpatialData()
 
-        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not overwrite:
+        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not self.overwrite:
             raise FileExistsError("File already exists, pass a new file or set overwrite to true")
-
+        proba = proba.rechunk(proba.chunksize)
         sdata["labels"] = Labels2DModel.parse(
                 proba,
                 dims=("y", "x"),
@@ -628,7 +568,7 @@ class ObjectClassificationController(ClassificationController):
             )
         sdata.write(
             os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}"),
-            overwrite,
+            self.overwrite,
         )
 
         return read_zarr(sdata.path)
@@ -646,7 +586,6 @@ class PixelClassificationController(ClassificationController):
         labels_layer:Labels,
         filters:tuple,
         to_train:bool,
-        overwrite:bool
     ):
 
         self.scale = infer_scales(selected_images, self.scale)
@@ -668,13 +607,13 @@ class PixelClassificationController(ClassificationController):
             features,
             self.prefix_name,
             to_train,
-            overwrite,
+            self.overwrite,
         )
 
-    def save_data(self, proba:da.Array, is_segmentation, is_probabilities, overwrite=False)->SpatialData:
+    def save_data(self, proba:da.Array, is_segmentation:bool, is_probabilities:bool)->SpatialData:
         sdata = SpatialData()
 
-        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not overwrite:
+        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not self.overwrite:
             raise FileExistsError("File already exists, pass a new file or set overwrite to true")
 
         if is_segmentation:
@@ -699,7 +638,7 @@ class PixelClassificationController(ClassificationController):
 
         sdata.write(
             os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}"),
-            overwrite=overwrite,
+            self.overwrite,
         )
 
         return read_zarr(sdata.path)
