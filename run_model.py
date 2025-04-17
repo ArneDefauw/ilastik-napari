@@ -27,32 +27,21 @@ def main():
     parser = argparse.ArgumentParser(prog='pixel/object classifier',
                                       description=main.__doc__)
 
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('-O', '--object', action='store_true', help='Use for object classification')
-    group.add_argument('-P', '--pixel', action='store_true', help='Use for pixel classification')
-
     parser.add_argument('-m', '--model', required=True, type=str, help='Path to the model')
     parser.add_argument('-i', '--images', required=True, type=str, help='Path to the images')
-    parser.add_argument('-o', '--output', required=True, type=str, help='The output of the classification')
     parser.add_argument('-f', '--file_path', required=True, type=str, help='Path to the result of the classification')
+    parser.add_argument('--overwrite', action='store_true', help='Use to overwrite the file at destinantion')
 
     args = parser.parse_args()
 
-    output_folder = check_and_get_path(args.output)
     model_path = check_and_get_path(args.model, '.pkl')
     images_path = check_and_get_path(args.images, '.zarr')
     result_path = os.path.join(CWD, args.file_path).rstrip("\\/")
 
-    print("TEST")
-    if args.object:
-        print("TEST")
-        logger.info("OBJECT CLASSIFICATION")
-        result = object_classification_workflow(model_path, images_path, output_folder)
-    elif args.pixel:
-        logger.info("PIXEL CLASSIFICATION")
-        result = pixel_classification_workflow(model_path, images_path, output_folder)
-    else:
-        show_error("No model type has been passed. Use '-O' for object classifiers or '-P' for pixel classifiers.")
+
+    logger.info("OBJECT CLASSIFICATION")
+    result = object_classification_workflow(model_path, images_path)
+
 
     sdata = SpatialData()
 
@@ -64,12 +53,13 @@ def main():
         )
     sdata.write(
         result_path,
+        overwrite=args.overwrite
     )
 
 
-def object_classification_workflow(model_path:str,
+def object_classification_workflow(
+        model_path:str,
         images_path:str,
-        output_folder:str,
     )->da.Array:
     logger.info("FETCHING DATA FOR OBJECT CLASSIFICATION")
     model = joblib.load(model_path)
@@ -105,13 +95,11 @@ def object_classification_workflow(model_path:str,
 
     mask = check_and_convert_layer(sdata.labels[masks[0]])
 
-    clf = Object_Classifier(output_folder)
-
-    features = clf.feature_extractor(mask, images, stats, 100)
+    features = Object_Classifier.feature_extractor(mask, images, stats, 100)
 
     X_features = features.drop( [Object_Classifier.ID_COLUMN_NAME], axis=1 )[model.feature_names_in_]
 
-    y_pred_all = clf.object_classification(X_features, model)
+    y_pred_all = Object_Classifier.object_classification(X_features, model)
 
     cell_ids=features[Object_Classifier.ID_COLUMN_NAME]
 
@@ -133,9 +121,6 @@ def check_and_convert_layer(item):
         root = item.groups[1]
         item = item[root].image
     return item.data
-
-def pixel_classification_workflow(model_path, images_path, output_folder):
-    pass
 
 def check_and_get_path(path_name:str, check_end:str=None):
     path = os.path.join(CWD, path_name).rstrip("\\/")

@@ -304,8 +304,8 @@ class Object_Classifier:
 
         self.output_folder = output_folder
 
+    @staticmethod
     def feature_extractor(
-        self,
         mask: da.Array,
         images: list[tuple[str, da.Array]],
         stats:tuple["Statistical_Functions"],
@@ -369,8 +369,8 @@ class Object_Classifier:
 
         joblib.dump(clf, os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
 
+    @staticmethod
     def object_classification(
-        self,
         X: dd.DataFrame,
         clf,
     ) -> np.ndarray:

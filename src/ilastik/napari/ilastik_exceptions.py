@@ -17,3 +17,8 @@ class DepthTooLarge(Exception):
 
     def __init__(self, *args):
         super().__init__(*args)
+
+class SameLayerException(Exception):
+
+    def __init__(self, *args):
+        super().__init__(*args)
