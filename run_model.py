@@ -7,6 +7,7 @@ import xarray as xa
 import dask.array as da
 import re
 import numpy as np
+import spatialdata
 
 from spatialdata.models import Labels2DModel
 from spatialdata import SpatialData
@@ -15,8 +16,8 @@ from ilastik.napari.object_classification import Statistical_Functions, Object_C
 
 CWD = os.getcwd()
 FILE_PATH = os.path.dirname(os.path.realpath(__file__))
-OBJECT_LABEL = "O"
-PIXEL_LABEL = "P"
+# OBJECT_LABEL = "O"
+# PIXEL_LABEL = "P"
 
 logger = logging.getLogger("model classifier")
 
@@ -24,35 +25,40 @@ def main():
     """
         TODO: documentation
     """
-    parser = argparse.ArgumentParser(prog='pixel/object classifier',
+    parser = argparse.ArgumentParser(prog='object classifier',
                                       description=main.__doc__)
 
-    parser.add_argument('-m', '--model', required=True, type=str, help='Path to the model')
-    parser.add_argument('-i', '--images', required=True, type=str, help='Path to the images')
-    parser.add_argument('-f', '--file_path', required=True, type=str, help='Path to the result of the classification')
-    parser.add_argument('--overwrite', action='store_true', help='Use to overwrite the file at destinantion')
+    parser.add_argument('-mo', '--model', required=True, type=str, help='Path to the model')
+    parser.add_argument('-d', '--sdata', required=True, type=str, help='Path to the spatial data')
+    parser.add_argument('-n', '--name', required=True, type=str, help='name of the result of the classification')
+    parser.add_argument('-ma', '--mask', required=True, type=str, help='The name of the mask in the data')
+    parser.add_argument('-o', '--output', required=True, type=str, help='Path to the output zarr store')
+    parser.add_argument('--overwrite', required=True, action='store_true')
+
 
     args = parser.parse_args()
 
     model_path = check_and_get_path(args.model, '.pkl')
-    images_path = check_and_get_path(args.images, '.zarr')
-    result_path = os.path.join(CWD, args.file_path).rstrip("\\/")
+    sdata_path = check_and_get_path(args.sdata, '.zarr')
 
 
     logger.info("OBJECT CLASSIFICATION")
-    result = object_classification_workflow(model_path, images_path)
+    result = object_classification_workflow(model_path, sdata_path, args.mask)
 
 
-    sdata = SpatialData()
+    sdata = read_zarr(sdata_path)
 
     proba = result.rechunk(result.chunksize)
-    sdata["labels"] = Labels2DModel.parse(
+    new_layer = Labels2DModel.parse(
             proba,
             dims=("y", "x"),
             chunks=proba.chunksize,
         )
+
+    sdata[args.name] = new_layer
+
     sdata.write(
-        result_path,
+        args.output,
         overwrite=args.overwrite
     )
 
@@ -60,6 +66,7 @@ def main():
 def object_classification_workflow(
         model_path:str,
         images_path:str,
+        mask_name:str
     )->da.Array:
     logger.info("FETCHING DATA FOR OBJECT CLASSIFICATION")
     model = joblib.load(model_path)
@@ -88,12 +95,7 @@ def object_classification_workflow(
 
     print(images)
 
-    masks = list(sdata.labels.keys())
-
-    if len(masks)>1:
-        logger.warning("More than one mask has been passed getting top")
-
-    mask = check_and_convert_layer(sdata.labels[masks[0]])
+    mask = check_and_convert_layer(sdata.labels[mask_name])
 
     features = Object_Classifier.feature_extractor(mask, images, stats, 100)
 

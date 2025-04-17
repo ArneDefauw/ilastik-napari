@@ -24,48 +24,41 @@ from spatialdata import get_pyramid_levels
 from napari import Viewer
 from napari.components import LayerList
 from napari.layers import Image, Labels, Layer, Shapes
-from ilastik.napari.filters import EmptyFilterListError
 from ilastik.napari.gui import CheckboxTableDialog, ErrorMessageBox, CheckboxDialog, FileOutputGroup, ImageViewQListWidget
 from ilastik.napari.object_classification import Statistical_Functions
 from ilastik.napari.controllers import PixelClassificationController, ObjectClassificationController
-from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, TooManyRectangles, DepthTooLarge, SameLayerException
+from ilastik.napari.ilastik_exceptions import IlastikException
 
 logger = loguru.logger
 
-def add_layer(data:xa.DataArray|xa.DataTree, viewer:Viewer, params:dict, type:str):
+def add_layer(image:xa.DataArray|xa.DataTree, viewer:Viewer, params:dict, type:str):
     to_scale=False
-    if isinstance(data, xa.DataTree):
-        pyramid = [level.data for level in get_pyramid_levels(data)]
+    if isinstance(image, xa.DataTree):
+        pyramid = [level.data for level in get_pyramid_levels(image)]
         if len(pyramid) > 1:
-            data = pyramid
+            image = pyramid
             to_scale = True
         else:
-            data = pyramid[0]
+            image = pyramid[0]
+    else:
+        image = image.data
 
     if type=="labels":
-        layer = viewer.add_labels(data, multiscale=to_scale, **params)
+        layer = viewer.add_labels(image, multiscale=to_scale, **params)
         layer.color_mode = "direct"
         layer.editable = False
     elif type=="image":
-        layer = viewer.add_image(data, multiscale=to_scale, **params)
+        layer = viewer.add_image(image, multiscale=to_scale, **params)
 
 def thread_handler(exec:Exception):
     logger.error(exec)
 
-    error_dir = {
-        InvalidPrefixError: ErrorMessageBox("Invalid prefix."),
-        FileExistsError: ErrorMessageBox("File already exists, please change the folder path or check the overwrite option."),
-        NotADirectoryError: ErrorMessageBox("The given folder does not exist"),
-        EmptyFilterListError: ErrorMessageBox("No filters has been passed"),
-        InvalidAnnotationsArray: ErrorMessageBox("less than two annotations have been passed. You must have two or more labels to run."),
-        TooManyRectangles: ErrorMessageBox("Too many rectangles has been passed in the shapes layer. Please pass one rectangle"),
-        DepthTooLarge: ErrorMessageBox("Given Depth is too large. It needs to be smaller than the image size."),
-        SameLayerException: ErrorMessageBox("You have passed two of the same layer. Please select or make anothor one."),
-    }
+    if isinstance(exec, IlastikException):
+        message = exec.get_error_message_box()
+    else:
+        message = IlastikException().get_error_message_box()
 
-    default_error_box = ErrorMessageBox("Something went wrong, check log.")
-
-    error_dir.get(type(exec), default_error_box).exec_()
+    ErrorMessageBox(message).exec_()
 
 class LayerModel(QSortFilterProxyModel):
     def __init__(self, layers: LayerList, parent=None):

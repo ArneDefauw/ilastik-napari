@@ -12,7 +12,7 @@ from ilastik.napari import filters
 from ilastik.napari.filters import FilterSet
 from napari.layers import Image, Labels, Shapes
 from ilastik.napari.object_classification import Pixel_Classifier, Object_Classifier, Statistical_Functions
-from ilastik.napari.ilastik_exceptions import TooManyRectangles, SameLayerException
+from ilastik.napari.ilastik_exceptions import TooManyRectangles, SameLayerException, BoxOutOfBoundsException
 
 logger = loguru.logger
 
@@ -104,6 +104,27 @@ class ObjectClassificationController(ClassificationController):
                 array = rectangle_indices[0].astype(int)
                 a, b = array[0,-2:]
                 c, d, = array[2,-2:]
+
+                # check if rectangle is in the image
+                if a<0:
+                    a = 0
+
+                if b<0:
+                    b = 0
+
+                if c<0 or d<0:
+                    raise BoxOutOfBoundsException("Invalid Rectangle.")
+
+                width, height = mask.shape
+
+                if c>width:
+                    c = width
+
+                if d>height:
+                    d = height
+
+                if a>width or b>height:
+                    raise BoxOutOfBoundsException("Invalid Rectangle.")
 
                 self.object_layer_params["translate"] = [a, b]
 

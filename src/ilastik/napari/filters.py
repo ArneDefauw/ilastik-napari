@@ -6,6 +6,7 @@ import numpy
 import dask.array as da
 from dask_image.ndfilters import gaussian_filter, gaussian_gradient_magnitude, gaussian_laplace
 from sklearn.base import BaseEstimator, TransformerMixin
+from ilastik.napari.ilastik_exceptions import EmptyFilterListError
 
 class Filter(BaseEstimator, TransformerMixin):
     def fit(self, X=None, y=None, **kwargs):
@@ -140,8 +141,3 @@ class FilterSet(Filter):
     @property
     def kernel_size(self):
         return max(f.kernel_size for f in self.filters)
-
-class EmptyFilterListError(Exception):
-
-    def __init__(self,*args):
-        super().__init__(*args)

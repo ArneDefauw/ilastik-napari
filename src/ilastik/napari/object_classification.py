@@ -18,12 +18,32 @@ from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
 from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, DepthTooLarge
+from typing import List, Tuple, Any
 
 dask.config.set({'dataframe.query-planning': False})
 
 logger = loguru.logger
 
-def list_tuple_splitter(x):
+def list_tuple_splitter(
+    x:List[Tuple[Any, Any]]
+    )->Tuple[List[Any],List[Any]]:
+    """
+    takes a list of tuples of length of 2 and splits them up in two lists.
+
+    Parameters
+    ----------
+    x : List[Tuple[Any, Any]]
+        The list of tuples which has two elements.
+
+    Return
+    ------
+    Tuple[List[Any],List[Any]]:
+        A tuple of two lists that contain the first and second elements respectively.
+
+    Note
+    ----
+    If you pass a list of tuples with more than two items it will only take the first two.
+    """
     a = []
     b = []
 
@@ -34,22 +54,25 @@ def list_tuple_splitter(x):
     return a, b
 
 def check_and_convert_arrays_to_dask(
-        argument
+        argument: Any
     ) -> da.Array:
     """
         Checks the data type of an array and converts it to a dask.array.Array if possible.
 
         Parameters
         ----------
-        argument: Any input
+        argument: Any
+            argument that you want to check and convert to a dask array
 
         Return
         ------
-        dask.array.Array: a dask array of the input.
+        dask.array.Array :
+            a dask array of the input.
 
         Raise
         -----
-        TypeError: if the input is a invalid datatype then raise.
+        TypeError :
+            if the input is a invalid datatype then raise.
     """
     if isinstance(argument, np.ndarray):
         return da.from_array(argument)
@@ -60,8 +83,24 @@ def check_and_convert_arrays_to_dask(
     return argument
 
 def check_folder_argument(
-        output_folder
+        output_folder:Any
     ) -> None:
+    """
+        Checks if the given parameter is a string and if it is a valid path to a directory. If not the an error is raised
+
+        Parameters
+        ----------
+        output_folder : Any
+            the argument that you want to check if it is a valid path
+
+        Raise
+        -----
+        TypeError :
+            If the argument is not a string
+
+        NotADirectoryError :
+            If the argument is not a valid directory
+    """
     if not isinstance(output_folder, str):
         raise TypeError("The argument [output_folder] has the wrong data type. Please pass a [str] instead.")
     if not os.path.isdir(output_folder):
@@ -71,28 +110,71 @@ class Pixel_Classifier:
     """
         The class that manages the pixel classification.
 
-        Constants
-        ---------
-        PREPROCESSED_ARRAY_NAME (str): Base name of the preprocessed array file.
-
-        PREPROCESSING_PIPE_NAME (str): Base name of the preprocessings pipline file.
-
-        MODEL_NAME (str): base name of the model file.
-
         Attributes
         ----------
-        output_folder (str): Path to the output folder
+        output_folder : str
+            Path to the output folder
 
         Methodes
         --------
-        preprocessing()
-            makes the
+        preprocessing(
+            image: da.Array,
+            estimators:list[tuple[str, FilterSet]],
+            prefix: str,
+            overwrite: bool = False,
+        )
+            makes the preprocessing images for the input of the model and saves them.
 
+        pixel_training(self,
+            X: da.Array,
+            labels: np.ndarray,
+            model_path: str,
+            **client_kwargs
+        )
+            trains the model and saves it.
 
+        def pixel_classification(
+            image: da.Array,
+            clf: NDSparseDaskClassifier,
+            predict_proba: bool = True,
+            **client_kwargs,
+        )
+            Classifies the given input with the given model.
+
+        def _workflow(
+            images: da.Array | np.ndarray | xa.DataArray,
+            labels: xa.DataArray | np.ndarray,
+            features:FilterSet,
+            prefix: str,
+            to_train: bool=True,
+            overwrite: bool=False,
+        )
+            Executes the entier pixel classification workflow.
+
+        def _workflow_thread(
+            image: da.Array,
+            labels: xa.DataArray | np.ndarray,
+            features:FilterSet,
+            prefix: str,
+            to_train: bool=True,
+            overwrite: bool=False,
+        )
+            Executes the entier pixel classification workflow as an napari worker thread.
+
+        Raises
+        ------
+        TypeError :
+            If the argument is not a string
+
+        NotADirectoryError :
+            If the argument is not a valid directory
     """
+    #: base name of the saved preprocessings .zarr file
     PREPROCESSED_ARRAY_NAME = "preprocessed_array.zarr"
+    #: base name of the saved preprocessing pipline file
     PREPROCESSING_PIPE_NAME = "preprocessing_pipe.pkl"
-    MODEL_NAME = "model.pkl"
+    #: base name of the saved model file
+    MODEL_NAME = "pixel_model.pkl"
 
     def __init__(
         self,
@@ -109,6 +191,25 @@ class Pixel_Classifier:
         prefix: str,  # prefix for preprocessed array
         overwrite: bool = False,
     ) -> da.Array:
+        """
+            Executes the preprocessing of the pixel classifier
+
+            Parameters
+            ----------
+            image : da.Array
+                A dask array of the images that needs to be preprocessed
+            estimators : List[Tuple[str, FilterSet]]
+                The list of filters that are going to be used on the images
+            prefix : str
+                The prefix that is going to used when the pipeline and features are going to be saved
+            overwrite : bool = False
+                If you want to overwrite the original pipeline and features
+
+            Returns
+            -------
+            da.Array :
+                The dask array of the features that has been extraxted from the filters
+        """
         pipe = Pipeline(estimators)
 
         arrays = []
@@ -131,12 +232,27 @@ class Pixel_Classifier:
             os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")
         )
 
-    def pixel_training(self,
+    def pixel_training(
+        self,
         X: da.Array,
         labels: np.ndarray,
         model_path: str,
         **client_kwargs
     ) -> None:
+        """
+            executes the training of the passed model with the given features using dask. This model is saved on the given path.
+
+            Parameters
+            ----------
+            X : da.Array
+                a dask array if the features that is going to be trained on
+
+            labels : np.ndarray
+                an array which contains the annotations that is going to classify the image
+
+            model_path : str
+                The path to the model to train on.
+        """
         # load features from the zarr store
         clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
         # add the classifier to the pipe, and then dump it
