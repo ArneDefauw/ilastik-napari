@@ -17,7 +17,7 @@ from sklearn.pipeline import Pipeline
 from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
-from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, DepthTooLarge
+from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, DepthTooLarge, IncompatibleFeatures
 from typing import List, Tuple, Any
 
 dask.config.set({'dataframe.query-planning': False})
@@ -252,6 +252,13 @@ class Pixel_Classifier:
 
             model_path : str
                 The path to the model to train on.
+
+            client_kwargs : dict
+                The arguments that you want to pass to the dask client
+
+            Return
+            ------
+            None
         """
         # load features from the zarr store
         clf = NDSparseDaskClassifier(RandomForestClassifier(n_jobs=-1))
@@ -276,6 +283,25 @@ class Pixel_Classifier:
         predict_proba: bool = True,
         **client_kwargs,
     ) -> da.Array:
+        """
+            Makes a classification with the passed image.
+
+            Parameter
+            ---------
+            image : da.Array
+                dask array of the image that you want to classify
+
+            clf : NDSparseDaskClassifier
+                The NDSparseDaskClassifier model that you want to classify on.
+
+            predict_proba: bool = True
+                Makes it that it returns the probabilities of each class too. Default true.
+
+            Returns
+            -------
+            da.Array :
+                A dask array of the classified image. Contains the probabilities if `predict_proba` was true.
+        """
 
         client = Client(**client_kwargs)
 
@@ -333,6 +359,19 @@ class Pixel_Classifier:
         to_train: bool=True,
         overwrite: bool=False,
     ):
+        """
+            The workflow which executes the entier workflow to classify an image.
+
+            Parameters
+            ----------
+            images :
+                the images that you want to classify in array form
+
+            labels :
+                The annotations that classifies the image
+
+                
+        """
         # check arguments if they have the write datatype and converts if possible
         images = check_and_convert_arrays_to_dask(images)
 
@@ -490,6 +529,9 @@ class Object_Classifier:
         X: dd.DataFrame,
         clf,
     ) -> np.ndarray:
+
+        if list(clf.feature_names_in_)!=list(X.columns):
+            raise IncompatibleFeatures("Features does not match model")
         return clf.predict(X)
 
     def object_classifier_workflow(
@@ -582,13 +624,32 @@ class Statistical_Functions(StrEnum):
         return [stat.value for stat in args]
 
     @staticmethod
-    def get_single_stats(stats: list[StrEnum]) -> list[str]:
-        aggregate_stats = {Statistical_Functions.SUM,
+    def get_single_stats(stats: list[StrEnum]=None) -> list[str]:
+        aggregate_stats = [Statistical_Functions.SUM,
                     Statistical_Functions.MEAN,
                     Statistical_Functions.COUNT,
                     Statistical_Functions.VAR,
                     Statistical_Functions.KURTOSIS,
-                    Statistical_Functions.SKEW}
+                    Statistical_Functions.SKEW]
+
+        if not stats:
+            return aggregate_stats
+
+        result = []
+        for stat in stats:
+            if stat in aggregate_stats:
+                result.append(stat.value)
+
+        return result
+
+    @staticmethod
+    def get_depth_stats(stats: list[StrEnum]=None) -> list[str]:
+        aggregate_stats = [Statistical_Functions.QUANTILES,
+                    Statistical_Functions.RADII_AND_AXES_MASK,]
+
+        if not stats:
+            return aggregate_stats
+
         result = []
         for stat in stats:
             if stat in aggregate_stats:

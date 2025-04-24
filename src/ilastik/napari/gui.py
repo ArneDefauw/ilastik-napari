@@ -1,5 +1,6 @@
 import collections.abc
 from typing import Iterable, Mapping, Sequence, Set, Tuple
+from ilastik.napari.object_classification import Statistical_Functions
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QStandardItem, QStandardItemModel, QIntValidator
@@ -160,12 +161,12 @@ class CheckboxDialog(QDialog):
 
         stat_layout = QVBoxLayout()
 
-        self.stats = []
+        self.stats = {}
 
         for i in item_list:
             checkbox = StoredQCheckbox(i, update_function=self._update_widgets)
             stat_layout.addWidget(checkbox)
-            self.stats.append(checkbox)
+            self.stats[i] = checkbox
 
         self.depth_label = NumberLineEdit("100")
         depth_layout = QHBoxLayout()
@@ -197,7 +198,7 @@ class CheckboxDialog(QDialog):
     def get_stat_functions(self):
         result = []
 
-        for i in self.stats:
+        for i in self.stats.values():
             if i.isChecked():
                 result.append(i.item)
         return result
@@ -206,11 +207,13 @@ class CheckboxDialog(QDialog):
         return self.depth_label.get_value()
 
     def _update_widgets(self):
-        self._ok_button.setEnabled(any([i.isChecked() for i in self.stats]))
+        self.depth_label.setEnabled(self.stats[Statistical_Functions.QUANTILES].isChecked()
+                                    or self.stats[Statistical_Functions.RADII_AND_AXES_MASK].isChecked())
+        self._ok_button.setEnabled(any([i.isChecked() for i in self.stats.values()]))
 
     def _handle_select(self, value):
         state = Qt.Checked if value else Qt.Unchecked
-        for k in self.stats:
+        for k in self.stats.values():
             k.setCheckState(state)
 
         self._update_widgets()

@@ -17,8 +17,34 @@ from ilastik.napari.ilastik_exceptions import TooManyRectangles, SameLayerExcept
 logger = loguru.logger
 
 class ClassificationController:
+    """
+        The controller that manages the interactions between the logic and UI.
+
+        Attributes
+        ----------
+        folder_path : str, Default = None
+            The path to the output folder
+
+        prefix_name : str, Default = None
+            The prefix that is going to be used for all the files
+
+        scale : list[int], Default = None
+            The list of scales that the image has if it was pyramidal
+
+        x_offset : int, Default = None
+            The x offset of the image if a sub image was passed. This makes sure that the x axis is known when showing it in the viewer
+
+        y_offset : int, Default = None
+            The y offset of the image if a sub image was passed. This makes sure that the x axis is known when showing it in the viewer
+
+        overwrite : bool, Default = False
+            If true it overwrites the files at the destination.
+    """
 
     def __init__(self):
+        """
+            Innitializes an ClassificationController
+        """
         self.folder_path = None
         self.prefix_name = None
 
@@ -31,9 +57,29 @@ class ClassificationController:
 
 
     def is_runnable(self)->bool:
+        """
+            Checks if the workflow is able to be run.
+
+            Return
+            ------
+            bool :
+                returns if the workflow is able to be run
+        """
         return bool(self.folder_path) and bool(self.prefix_name)
 
     def infer_scales(self, layers):
+        """
+            Checks if the layers is multiscale and infers the scales
+
+            Parameters
+            ----------
+            layers : list[Layer]
+                List of layers that has a multiscale image or not
+
+            Return
+            ------
+                None
+        """
         scale = []
         for layer in layers:
             if layer.multiscale:
@@ -55,6 +101,14 @@ class ClassificationController:
 
     @staticmethod
     def check_and_convert_multilayer(input):
+        """
+        Checks if a layer is pyramidal and returns the top
+
+        Parameters
+        ----------
+        input: Layer
+            A napari image
+        """
         if input.multiscale:
             return input.data._data[0]
         else:
@@ -81,6 +135,11 @@ class ObjectClassificationController(ClassificationController):
     ) -> da.Array:
         if mask_layer.name==annotion_layer.name:
             raise SameLayerException("mask layer and annotation layers are the same")
+
+        print(mask_layer)
+        print(selected_images)
+        print(annotion_layer)
+        print(shape_layer)
 
         classifier = Object_Classifier(output_folder=self.folder_path)
 

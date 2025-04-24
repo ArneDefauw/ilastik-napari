@@ -7,10 +7,8 @@ import xarray as xa
 import dask.array as da
 import re
 import numpy as np
-import spatialdata
 
 from spatialdata.models import Labels2DModel
-from spatialdata import SpatialData
 from spatialdata import read_zarr
 from ilastik.napari.object_classification import Statistical_Functions, Object_Classifier
 

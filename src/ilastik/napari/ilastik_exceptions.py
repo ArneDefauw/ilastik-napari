@@ -77,4 +77,4 @@ class IncompatibleFeatures(IlastikException):
 
     @classmethod
     def get_error_message_box(self):
-        return f"The selected features ar not compatible.{super}"
+        return "The selected features ar not compatible."
