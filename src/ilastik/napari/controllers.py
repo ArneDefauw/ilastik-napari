@@ -115,10 +115,23 @@ class ClassificationController:
             return input.data
 
 class ObjectClassificationController(ClassificationController):
+    """
+        The Classification Controller that is in charge of managing the interactions of the UI with the rest of the logic.
+
+        Attributes
+        ----------
+        object_layer_params :
+            the parameters that are passed when adding a new layer to the napari viewer
+    """
+    # The default name of the object data zarr store
     SDATA_NAME = "object_sdata.zarr"
+    # The string name of a rectangle in the shapes layer in napari
     RECTANGLE_STRING = 'rectangle'
 
     def __init__(self):
+        """
+            Initialize ObjectClassificationController object
+        """
         super().__init__()
         self.object_layer_params = dict(name="ilastik-objects", opacity=1, translate=None)
 
@@ -133,13 +146,42 @@ class ObjectClassificationController(ClassificationController):
         depth:int,
         to_train=True,
     ) -> da.Array:
+        """
+        The napari thread worker that executes the object classification workflow. It extracts all the needed data to pass to the object classification workflow.
+
+        Parameters
+        ----------
+        mask_layer : Labels
+            The label layer that contains the unique ids of the cells in the image
+        selected_images : List[Image]
+            An list of image layers that contain the data that you want to pass through to the model
+        annotation_layer : Labels
+            The label layer that contains the annotations that you want to pass the the model
+        shape_layer : Shapes
+            The part of the image that you want to train and classify on in the form of a shapes layer. Can only contain one layer and must be an rectangle
+        depth : int
+            The depth parameter that is needed to pass for the statistical functions. See :func:`~ilastik.napari.object_classification.Object_Classifier.feature_extractor`
+        to_train : bool, default=True
+            The to_train parameter that is used if you want to train the model first. See :func:`~ilastik.napari.object_classification.Object_Classifier.object_classifier_workflow`
+
+        Return
+        ------
+        da.Array :
+            The result of the classification in the form of an array
+
+        Raise
+        -----
+        SameLayerException :
+            mask_layer and annotation_layer parameters are the same layer.
+
+        TooManyRectangles :
+            More than one rectangle has been passed
+
+        BoxOutOfBoundsException :
+            The rectangle in the shapes layer is out of bounds
+        """
         if mask_layer.name==annotion_layer.name:
             raise SameLayerException("mask layer and annotation layers are the same")
-
-        print(mask_layer)
-        print(selected_images)
-        print(annotion_layer)
-        print(shape_layer)
 
         classifier = Object_Classifier(output_folder=self.folder_path)
 
@@ -201,6 +243,26 @@ class ObjectClassificationController(ClassificationController):
         return classifier.object_classifier_workflow(mask, images, annotions, statistical_functions, depth, self.prefix_name, to_train)
 
     def save_data(self, proba:da.Array)->SpatialData:
+        """
+            makes a spatial data object of the result and saves it as an .zarr
+
+            Parameters
+            ----------
+            proba : da.Array
+                The result of the classification
+
+            Return
+            ------
+            SpatialData :
+                the spatialdata object that contains the result of the classification
+
+            Raise
+            -----
+            FileExistsError
+                If the file already exists and the overwrite option is false thusly can not save the object at the file destination
+        """
+        # TODO: A wierd error occures when you try to train the model on a small part of the dataset (passing a rectangle), remove the shapes layer and then try to train on the whole image
+        # Can be because of memory problems.
         sdata = SpatialData()
 
         if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not self.overwrite:

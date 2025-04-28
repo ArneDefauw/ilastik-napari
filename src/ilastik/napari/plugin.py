@@ -56,7 +56,7 @@ def thread_handler(exec:Exception):
     if isinstance(exec, IlastikException):
         message = exec.get_error_message_box()
     else:
-        message = IlastikException().get_error_message_box()
+        message = IlastikException("An error occured check the logs").get_error_message_box()
 
     ErrorMessageBox(message).exec_()
 

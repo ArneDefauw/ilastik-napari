@@ -17,7 +17,7 @@ from sklearn.pipeline import Pipeline
 from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
-from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, DepthTooLarge, IncompatibleFeatures
+from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, InvalidDepth, IncompatibleFeatures
 from typing import List, Tuple, Any
 
 dask.config.set({'dataframe.query-planning': False})
@@ -370,7 +370,7 @@ class Pixel_Classifier:
             labels :
                 The annotations that classifies the image
 
-                
+
         """
         # check arguments if they have the write datatype and converts if possible
         images = check_and_convert_arrays_to_dask(images)
@@ -505,8 +505,10 @@ class Object_Classifier:
                 rna = aggregator.aggregate_radii_and_axes(depth)
                 rna.columns = [f"{Statistical_Functions.RADII_AND_AXES_MASK}_{c}" if c!=Object_Classifier.ID_COLUMN_NAME else c for c in rna.columns]
                 features.append(rna)
-        except ValueError as e:
-            raise DepthTooLarge(e)
+        except ValueError:
+            raise InvalidDepth("Depth is too big")
+        except AssertionError:
+            raise InvalidDepth("Depth is too small")
 
         res = reduce(lambda left, right: dd.merge(left, right, on=Object_Classifier.ID_COLUMN_NAME, how='outer'), features)
         res = res.loc[res[Object_Classifier.ID_COLUMN_NAME]!=0]
