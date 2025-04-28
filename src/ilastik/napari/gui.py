@@ -248,7 +248,7 @@ class ImageViewQListWidget(QListWidget):
         if self._update_widgets:
             self._update_widgets()
 
-class FileOutputGroup(QGroupBox):
+class ProjectGroup(QGroupBox):
 
     def __init__(self, classifier_controler, update_function=None, **kwargs):
         super().__init__(**kwargs)
@@ -265,53 +265,27 @@ class FileOutputGroup(QGroupBox):
         self.folder_label.setWordWrap(True)
         self.folder_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
-        self.prefix_group = QGroupBox("Prefix")
-
-        self.prefix_button = QPushButton("confirm prefix")
-        self.prefix_button.clicked.connect(self._select_prefix)
-
-        self.prefix_line_edit = ListeningQLineEdit(update_function=self._select_prefix)
-        self.prefix_line_edit.setPlaceholderText("Please set prefix...")
-
-        prefix_layout = QVBoxLayout()
-        prefix_layout.addWidget(self.prefix_line_edit)
-        prefix_layout.addWidget(self.prefix_button)
-        self.prefix_group.setLayout(prefix_layout)
-
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
 
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
         output_file_layout.addWidget(self.folder_label)
-        output_file_layout.addWidget(self.prefix_group)
         output_file_layout.addWidget(self.overwrite)
         self.setLayout(output_file_layout)
 
     def _update_widgets(self):
-        self.prefix_group.setEnabled(bool(self.classifier_controler.folder_path))
         self.folder_label.setText(
-            self.classifier_controler.folder_path if self.classifier_controler.folder_path else "No folder selected"
+            self.classifier_controler.project_path if self.classifier_controler.project_path else "No folder selected"
         )
-        self.prefix_line_edit.setText(self.classifier_controler.prefix_name)
-        self.setEnabled(bool(self.classifier_controler.folder_path))
+        self.setEnabled(bool(self.classifier_controler.project_path))
 
         self.classifier_controler.overwrite = self.overwrite.isChecked()
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
         if folder_path is not None:
-            self.classifier_controler.folder_path = folder_path
+            self.classifier_controler.project_path = folder_path
 
-        self.classifier_controler.prefix_name = None
 
         self._update_widgets()
-
-    def setEnabled(self, condition):
-        self.prefix_button.setEnabled(condition)
-        self.prefix_line_edit.setEnabled(condition)
-
-    def _select_prefix(self):
-        self.classifier_controler.prefix_name = self.prefix_line_edit.text()
-        if self._update_other_widgets:
-            self._update_other_widgets()

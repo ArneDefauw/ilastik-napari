@@ -2,6 +2,8 @@ import os
 import dask.array as da
 import loguru
 import numpy as np
+import re
+import joblib
 
 from napari.qt.threading import thread_worker
 from spatialdata import read_zarr
@@ -17,37 +19,16 @@ from ilastik.napari.ilastik_exceptions import TooManyRectangles, SameLayerExcept
 logger = loguru.logger
 
 class ClassificationController:
-    """
-        The controller that manages the interactions between the logic and UI.
 
-        Attributes
-        ----------
-        folder_path : str, Default = None
-            The path to the output folder
 
-        prefix_name : str, Default = None
-            The prefix that is going to be used for all the files
+    def __init__(self, project_path:str):
 
-        scale : list[int], Default = None
-            The list of scales that the image has if it was pyramidal
+        if not isinstance(project_path, str):
+            raise TypeError("The argument [project_path] has the wrong data type. Please pass a [str] instead.")
+        if not os.path.isdir(project_path):
+            raise NotADirectoryError(f"The given path: {project_path} for argument [project_path] is not a directory. Please pass a valid one.")
 
-        x_offset : int, Default = None
-            The x offset of the image if a sub image was passed. This makes sure that the x axis is known when showing it in the viewer
-
-        y_offset : int, Default = None
-            The y offset of the image if a sub image was passed. This makes sure that the x axis is known when showing it in the viewer
-
-        overwrite : bool, Default = False
-            If true it overwrites the files at the destination.
-    """
-
-    def __init__(self):
-        """
-            Innitializes an ClassificationController
-        """
-        self.folder_path = None
-        self.prefix_name = None
-
+        self.project_path = project_path
         self.scale = None
 
         self.x_offset = None
@@ -55,31 +36,8 @@ class ClassificationController:
 
         self.overwrite = False
 
-
-    def is_runnable(self)->bool:
-        """
-            Checks if the workflow is able to be run.
-
-            Return
-            ------
-            bool :
-                returns if the workflow is able to be run
-        """
-        return bool(self.folder_path) and bool(self.prefix_name)
-
     def infer_scales(self, layers):
-        """
-            Checks if the layers is multiscale and infers the scales
 
-            Parameters
-            ----------
-            layers : list[Layer]
-                List of layers that has a multiscale image or not
-
-            Return
-            ------
-                None
-        """
         scale = []
         for layer in layers:
             if layer.multiscale:
@@ -101,38 +59,24 @@ class ClassificationController:
 
     @staticmethod
     def check_and_convert_multilayer(input):
-        """
-        Checks if a layer is pyramidal and returns the top
 
-        Parameters
-        ----------
-        input: Layer
-            A napari image
-        """
         if input.multiscale:
             return input.data._data[0]
         else:
             return input.data
 
 class ObjectClassificationController(ClassificationController):
-    """
-        The Classification Controller that is in charge of managing the interactions of the UI with the rest of the logic.
 
-        Attributes
-        ----------
-        object_layer_params :
-            the parameters that are passed when adding a new layer to the napari viewer
-    """
     # The default name of the object data zarr store
     SDATA_NAME = "object_sdata.zarr"
     # The string name of a rectangle in the shapes layer in napari
     RECTANGLE_STRING = 'rectangle'
 
     def __init__(self):
-        """
-            Initialize ObjectClassificationController object
-        """
         super().__init__()
+        self.model_path = os.path.join(self.project_path, Object_Classifier.MODEL_NAME)
+        stats_im = self.get_statistical_functions_and_images()
+        self.statistical_functions = stats_im[0] if stats_im else [i for i in Statistical_Functions]
         self.object_layer_params = dict(name="ilastik-objects", opacity=1, translate=None)
 
     @thread_worker
@@ -142,44 +86,10 @@ class ObjectClassificationController(ClassificationController):
         selected_images:list[Image],
         annotion_layer: Labels,
         shape_layer: Shapes,
-        statistical_functions:list[Statistical_Functions],
         depth:int,
         to_train=True,
     ) -> da.Array:
-        """
-        The napari thread worker that executes the object classification workflow. It extracts all the needed data to pass to the object classification workflow.
 
-        Parameters
-        ----------
-        mask_layer : Labels
-            The label layer that contains the unique ids of the cells in the image
-        selected_images : List[Image]
-            An list of image layers that contain the data that you want to pass through to the model
-        annotation_layer : Labels
-            The label layer that contains the annotations that you want to pass the the model
-        shape_layer : Shapes
-            The part of the image that you want to train and classify on in the form of a shapes layer. Can only contain one layer and must be an rectangle
-        depth : int
-            The depth parameter that is needed to pass for the statistical functions. See :func:`~ilastik.napari.object_classification.Object_Classifier.feature_extractor`
-        to_train : bool, default=True
-            The to_train parameter that is used if you want to train the model first. See :func:`~ilastik.napari.object_classification.Object_Classifier.object_classifier_workflow`
-
-        Return
-        ------
-        da.Array :
-            The result of the classification in the form of an array
-
-        Raise
-        -----
-        SameLayerException :
-            mask_layer and annotation_layer parameters are the same layer.
-
-        TooManyRectangles :
-            More than one rectangle has been passed
-
-        BoxOutOfBoundsException :
-            The rectangle in the shapes layer is out of bounds
-        """
         if mask_layer.name==annotion_layer.name:
             raise SameLayerException("mask layer and annotation layers are the same")
 
@@ -240,32 +150,15 @@ class ObjectClassificationController(ClassificationController):
             self.object_layer_params["translate"] = None
 
 
-        return classifier.object_classifier_workflow(mask, images, annotions, statistical_functions, depth, self.prefix_name, to_train)
+        return classifier.object_classifier_workflow(mask, images, annotions, self.statistical_functions, depth, to_train)
 
     def save_data(self, proba:da.Array)->SpatialData:
-        """
-            makes a spatial data object of the result and saves it as an .zarr
 
-            Parameters
-            ----------
-            proba : da.Array
-                The result of the classification
-
-            Return
-            ------
-            SpatialData :
-                the spatialdata object that contains the result of the classification
-
-            Raise
-            -----
-            FileExistsError
-                If the file already exists and the overwrite option is false thusly can not save the object at the file destination
-        """
         # TODO: A wierd error occures when you try to train the model on a small part of the dataset (passing a rectangle), remove the shapes layer and then try to train on the whole image
         # Can be because of memory problems.
         sdata = SpatialData()
 
-        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not self.overwrite:
+        if os.path.exists(os.path.join(self.project_path, self.SDATA_NAME)) and not self.overwrite:
             raise FileExistsError("File already exists, pass a new file or set overwrite to true")
         proba = proba.rechunk(proba.chunksize)
         sdata["labels"] = Labels2DModel.parse(
@@ -275,11 +168,46 @@ class ObjectClassificationController(ClassificationController):
                 chunks=proba.chunksize,
             )
         sdata.write(
-            os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}"),
+            os.path.join(self.project_path, self.SDATA_NAME),
             self.overwrite,
         )
 
         return read_zarr(sdata.path)
+
+    def get_statistical_functions_and_images(self):
+        if not os.path.isfile(self.model_path):
+            return None
+
+        model = joblib.load(self.model_path)
+        features_names = model.feature_names_in_
+
+        stats = set()
+        image_names = set()
+
+        for f in features_names:
+            stats.add(Statistical_Functions(re.search(r'^[A-Za-z]+_?[A-Za-z]+', f).group()))
+
+            tup = f.split(" ")
+
+            if len(tup)==2:
+                image_names.add(tup[1])
+
+        return stats, image_names
+
+    # def check_extracted_features(self, image_layers:list[Image]):
+
+    #     stat_func = self.get_statistical_functions_and_images()
+
+    #     if stat_func:
+    #         stats, image_names = stat_func
+    #         layer_image_names = {i.name for i in image_layers}
+
+    #         return image_names == layer_image_names and stats == self.statistical_functions
+
+    #     return False
+
+    def set_statistical_function(self, statistical_functions):
+        self.statistical_functions = statistical_functions
 
 class PixelClassificationController(ClassificationController):
 
