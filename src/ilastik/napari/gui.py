@@ -2,7 +2,7 @@ import collections.abc
 from typing import Iterable, Mapping, Sequence, Set, Tuple
 from ilastik.napari.object_classification import Statistical_Functions
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QPoint
 from qtpy.QtGui import QStandardItem, QStandardItemModel, QIntValidator
 from qtpy.QtWidgets import (
     QDialog,
@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QListWidget,
     QHBoxLayout
 )
+from napari.qt import get_stylesheet
 
 def rc_pairs(nrows: int, ncolumns: int) -> Iterable[Tuple[int, int]]:
     """Yield pairs of (row, column) indices."""
@@ -156,12 +157,14 @@ class NumberLineEdit(QLineEdit):
         return int(self.text())
 
 class CheckboxDialog(QDialog):
-    def __init__(self, item_list, default=True, parent=None):
+    def __init__(self, item_list, close_event=None, default=True, parent=None):
         super().__init__(parent)
 
         stat_layout = QVBoxLayout()
 
         self.stats = {}
+
+        self.close_event = close_event
 
         for i in item_list:
             checkbox = StoredQCheckbox(i, update_function=self._update_widgets)
@@ -196,11 +199,11 @@ class CheckboxDialog(QDialog):
         self._handle_select(default)
 
     def get_stat_functions(self):
-        result = []
+        result = set()
 
         for i in self.stats.values():
             if i.isChecked():
-                result.append(i.item)
+                result.add(i.item)
         return result
 
     def get_depth(self):
@@ -217,6 +220,10 @@ class CheckboxDialog(QDialog):
             k.setCheckState(state)
 
         self._update_widgets()
+
+    def accept(self):
+        super().accept()
+        self.close_event()
 
 class ErrorMessageBox(QMessageBox):
 
@@ -267,6 +274,7 @@ class ProjectGroup(QGroupBox):
 
         self.overwrite = QCheckBox("overwrite")
         self.overwrite.setChecked(False)
+        self.overwrite.clicked.connect(self._update_widgets)
 
         output_file_layout = QVBoxLayout()
         output_file_layout.addWidget(folder_button)
@@ -278,9 +286,10 @@ class ProjectGroup(QGroupBox):
         self.folder_label.setText(
             self.classifier_controler.project_path if self.classifier_controler.project_path else "No folder selected"
         )
-        self.setEnabled(bool(self.classifier_controler.project_path))
 
         self.classifier_controler.overwrite = self.overwrite.isChecked()
+        if self._update_other_widgets:
+            self._update_other_widgets()
 
     def _select_folder(self):
         folder_path = QFileDialog.getExistingDirectory(None, "Select Folder")
@@ -289,3 +298,64 @@ class ProjectGroup(QGroupBox):
 
 
         self._update_widgets()
+
+class HoverCheckbox(QCheckBox):
+
+    def __init__(self, label, popup, parent=None):
+        super().__init__(label, parent)
+
+        self.setMouseTracking(True)
+        self.popup = popup
+
+    def setEnabled(self, condition):
+        super().setEnabled(condition)
+
+        self.setChecked(True)
+
+    def enterEvent(self, event):
+        if not self.isEnabled():
+            cursor_pos = self.mapToGlobal(self.rect().topLeft())
+            self.popup.activate(cursor_pos)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self.isEnabled():
+            self.popup.deactivate()
+        super().leaveEvent(event)
+
+class Popup(QLabel):
+
+    def __init__(self, label, parent=None):
+        super().__init__(label, parent)
+        self.setWindowFlags(Qt.ToolTip)  # Makes it behave like a tooltip
+
+        self.setStyleSheet(get_stylesheet())
+
+        self.adjustSize()
+        self.hide()
+
+    def activate(self, cursor_pos):
+        popup_width = self.width()
+        self.move(cursor_pos - QPoint(popup_width + 10, 0))
+        self.show()
+
+    def deactivate(self):
+        self.hide()
+
+class InputGroup(QGroupBox):
+    def __init__(self, label, controler, parent=None):
+        super().__init__(label, parent)
+        self.popup = Popup("Must select an project folder")
+        self.controler = controler
+
+    def enterEvent(self, event):
+        if not self.isEnabled():
+            cursor_pos = self.mapToGlobal(self.rect().topLeft())
+            self.popup.activate(cursor_pos)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self.isEnabled():
+            self.popup.deactivate()
+        super().leaveEvent(event)
+

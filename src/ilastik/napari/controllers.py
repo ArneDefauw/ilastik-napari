@@ -21,14 +21,8 @@ logger = loguru.logger
 class ClassificationController:
 
 
-    def __init__(self, project_path:str):
-
-        if not isinstance(project_path, str):
-            raise TypeError("The argument [project_path] has the wrong data type. Please pass a [str] instead.")
-        if not os.path.isdir(project_path):
-            raise NotADirectoryError(f"The given path: {project_path} for argument [project_path] is not a directory. Please pass a valid one.")
-
-        self.project_path = project_path
+    def __init__(self):
+        self.project_path = None
         self.scale = None
 
         self.x_offset = None
@@ -74,9 +68,6 @@ class ObjectClassificationController(ClassificationController):
 
     def __init__(self):
         super().__init__()
-        self.model_path = os.path.join(self.project_path, Object_Classifier.MODEL_NAME)
-        stats_im = self.get_statistical_functions_and_images()
-        self.statistical_functions = stats_im[0] if stats_im else [i for i in Statistical_Functions]
         self.object_layer_params = dict(name="ilastik-objects", opacity=1, translate=None)
 
     @thread_worker
@@ -86,14 +77,18 @@ class ObjectClassificationController(ClassificationController):
         selected_images:list[Image],
         annotion_layer: Labels,
         shape_layer: Shapes,
+        statistical_functions: list[Statistical_Functions],
         depth:int,
         to_train=True,
     ) -> da.Array:
 
+        if os.path.exists(os.path.join(self.project_path, self.SDATA_NAME)) and not self.overwrite:
+            raise FileExistsError("File already exists, pass a new file or set overwrite to true")
+
         if mask_layer.name==annotion_layer.name:
             raise SameLayerException("mask layer and annotation layers are the same")
 
-        classifier = Object_Classifier(output_folder=self.folder_path)
+        classifier = Object_Classifier(output_folder=self.project_path)
 
         mask = self.check_and_convert_multilayer(mask_layer)
 
@@ -150,7 +145,7 @@ class ObjectClassificationController(ClassificationController):
             self.object_layer_params["translate"] = None
 
 
-        return classifier.object_classifier_workflow(mask, images, annotions, self.statistical_functions, depth, to_train)
+        return classifier.object_classifier_workflow(mask, images, annotions, statistical_functions, depth, to_train)
 
     def save_data(self, proba:da.Array)->SpatialData:
 
@@ -174,15 +169,20 @@ class ObjectClassificationController(ClassificationController):
 
         return read_zarr(sdata.path)
 
-    def get_statistical_functions_and_images(self):
-        if not os.path.isfile(self.model_path):
-            return None
+    def check_if_features_are_same(self, new_stats, new_image_names):
+        if not self.project_path:
+            return False
 
-        model = joblib.load(self.model_path)
-        features_names = model.feature_names_in_
+        model_path = os.path.join(str(self.project_path), Object_Classifier.MODEL_NAME)
+
+        if not os.path.isfile(model_path):
+            return False
+
+        model = joblib.load(model_path)
 
         stats = set()
         image_names = set()
+        features_names = model.feature_names_in_
 
         for f in features_names:
             stats.add(Statistical_Functions(re.search(r'^[A-Za-z]+_?[A-Za-z]+', f).group()))
@@ -192,22 +192,7 @@ class ObjectClassificationController(ClassificationController):
             if len(tup)==2:
                 image_names.add(tup[1])
 
-        return stats, image_names
-
-    # def check_extracted_features(self, image_layers:list[Image]):
-
-    #     stat_func = self.get_statistical_functions_and_images()
-
-    #     if stat_func:
-    #         stats, image_names = stat_func
-    #         layer_image_names = {i.name for i in image_layers}
-
-    #         return image_names == layer_image_names and stats == self.statistical_functions
-
-    #     return False
-
-    def set_statistical_function(self, statistical_functions):
-        self.statistical_functions = statistical_functions
+        return stats==new_stats and image_names==new_image_names
 
 class PixelClassificationController(ClassificationController):
 
@@ -250,7 +235,7 @@ class PixelClassificationController(ClassificationController):
         self._unique_labels = np.unique(labels_layer.data)
         self._unique_labels = self._unique_labels[self._unique_labels != 0]
 
-        classifier = Pixel_Classifier(output_folder=self.folder_path)
+        classifier = Pixel_Classifier(output_folder=self.project_path)
 
         features = FilterSet(filters=filters)
 
@@ -258,7 +243,6 @@ class PixelClassificationController(ClassificationController):
             image,
             labels_layer.data,
             features,
-            self.prefix_name,
             to_train,
             self.overwrite,
         )
@@ -266,7 +250,7 @@ class PixelClassificationController(ClassificationController):
     def save_data(self, proba:da.Array, is_segmentation:bool, is_probabilities:bool)->SpatialData:
         sdata = SpatialData()
 
-        if os.path.exists(os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}")) and not self.overwrite:
+        if os.path.exists(os.path.join(self.project_path, self.SDATA_NAME)) and not self.overwrite:
             raise FileExistsError("File already exists, pass a new file or set overwrite to true")
 
         if is_segmentation:
@@ -290,7 +274,7 @@ class PixelClassificationController(ClassificationController):
             )
 
         sdata.write(
-            os.path.join(self.folder_path, f"{self.prefix_name}_{self.SDATA_NAME}"),
+            os.path.join(self.project_path, self.SDATA_NAME),
             self.overwrite,
         )
 

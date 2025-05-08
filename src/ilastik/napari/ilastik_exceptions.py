@@ -45,3 +45,8 @@ class IncompatibleFeatures(IlastikException):
 
     def __init__(self, *args):
         super().__init__(*args)
+
+class NoModelFound(IlastikException):
+
+    def __init__(self, *args):
+        super().__init__(*args)

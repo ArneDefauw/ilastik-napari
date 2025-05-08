@@ -91,8 +91,6 @@ def object_classification_workflow(
     for i in image_names:
         images.append((i, check_and_convert_layer(sdata.images[i])))
 
-    print(images)
-
     mask = check_and_convert_layer(sdata.labels[mask_name])
 
     features = Object_Classifier.feature_extractor(mask, images, stats, 100)

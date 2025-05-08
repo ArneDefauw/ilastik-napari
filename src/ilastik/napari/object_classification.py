@@ -17,7 +17,7 @@ from sklearn.pipeline import Pipeline
 from ilastik.napari.classifier import NDSparseDaskClassifier
 from ilastik.napari.utils import get_annotation
 from napari.qt.threading import thread_worker
-from ilastik.napari.ilastik_exceptions import InvalidPrefixError, InvalidAnnotationsArray, InvalidDepth, IncompatibleFeatures
+from ilastik.napari.ilastik_exceptions import InvalidAnnotationsArray, InvalidDepth, IncompatibleFeatures, NoModelFound
 from typing import List, Tuple, Any
 
 dask.config.set({'dataframe.query-planning': False})
@@ -188,7 +188,6 @@ class Pixel_Classifier:
         self,
         image: da.Array,
         estimators:list[tuple[str, FilterSet]],
-        prefix: str,  # prefix for preprocessed array
         overwrite: bool = False,
     ) -> da.Array:
         """
@@ -221,7 +220,7 @@ class Pixel_Classifier:
 
         feature_map_lazy.to_zarr(
             os.path.join(
-                self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}"
+                self.output_folder, self.PREPROCESSED_ARRAY_NAME
             ),
             overwrite=overwrite,
         )  # this could be large
@@ -229,7 +228,7 @@ class Pixel_Classifier:
             pipe, os.path.join(self.output_folder, self.PREPROCESSING_PIPE_NAME)
         )
         return da.from_zarr(
-            os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")
+            os.path.join(self.output_folder, self.PREPROCESSED_ARRAY_NAME)
         )
 
     def pixel_training(
@@ -355,7 +354,6 @@ class Pixel_Classifier:
         images: da.Array | np.ndarray | xa.DataArray,
         labels: xa.DataArray | np.ndarray,
         features:FilterSet,
-        prefix: str,
         to_train: bool=True,
         overwrite: bool=False,
     ):
@@ -388,13 +386,7 @@ class Pixel_Classifier:
         if not isinstance(features, FilterSet):
             raise TypeError("The argument [features] has the wrong data type. Please pass a FilterSet")
 
-        if not isinstance(prefix, str):
-            raise TypeError("The argument [prefix] has the wrong data type. Please pass a str")
-
-        if prefix.isspace() or prefix=="":
-            raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
-
-        if os.path.exists(os.path.join(self.output_folder, f"{prefix}_{self.PREPROCESSED_ARRAY_NAME}")) and not overwrite:
+        if os.path.exists(os.path.join(self.output_folder, self.PREPROCESSED_ARRAY_NAME)) and not overwrite:
             raise FileExistsError("File already exists, pass a new file or set overwrite to true")
 
         # Start of workflow
@@ -403,7 +395,6 @@ class Pixel_Classifier:
         data = self.preprocessing(
             image=images,
             estimators=estimators,
-            prefix=prefix,
             overwrite=overwrite,
         )
 
@@ -421,6 +412,9 @@ class Pixel_Classifier:
             )
 
         model_path = os.path.join(self.output_folder, self.MODEL_NAME)
+
+        if not os.path.isfile(model_path):
+            raise NoModelFound("No model is found please make or train on.")
         clf = joblib.load(model_path)
 
         logger.info("PIXEL CLASSIFICATION: starting classification")
@@ -440,11 +434,10 @@ class Pixel_Classifier:
         image: da.Array,
         labels: xa.DataArray | np.ndarray,
         features:FilterSet,
-        prefix: str,
         to_train: bool=True,
         overwrite: bool=False,
     ):
-        return self._workflow(image, labels, features, prefix, to_train, overwrite)
+        return self._workflow(image, labels, features, to_train, overwrite)
 
 class Object_Classifier:
     MODEL_NAME = "object_model.pkl"
@@ -505,9 +498,11 @@ class Object_Classifier:
                 rna = aggregator.aggregate_radii_and_axes(depth)
                 rna.columns = [f"{Statistical_Functions.RADII_AND_AXES_MASK}_{c}" if c!=Object_Classifier.ID_COLUMN_NAME else c for c in rna.columns]
                 features.append(rna)
-        except ValueError:
+        except ValueError as e:
+            logger.warning(e)
             raise InvalidDepth("Depth is too big")
-        except AssertionError:
+        except AssertionError as e:
+            logger.warning(e)
             raise InvalidDepth("Depth is too small")
 
         res = reduce(lambda left, right: dd.merge(left, right, on=Object_Classifier.ID_COLUMN_NAME, how='outer'), features)
@@ -519,19 +514,17 @@ class Object_Classifier:
         self,
         X_train: dd.DataFrame,
         y_train: dd.DataFrame,
-        prefix: str,
     ) -> None:
         clf = RandomForestClassifier(n_estimators=100, random_state=42)
         clf.fit(X_train, y_train)
 
-        joblib.dump(clf, os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
+        joblib.dump(clf, os.path.join(self.output_folder, self.MODEL_NAME))
 
     @staticmethod
     def object_classification(
         X: dd.DataFrame,
         clf,
     ) -> np.ndarray:
-
         if list(clf.feature_names_in_)!=list(X.columns):
             raise IncompatibleFeatures("Features does not match model")
         return clf.predict(X)
@@ -543,7 +536,6 @@ class Object_Classifier:
         annotation: da.Array | np.ndarray | xa.DataArray,
         statistical_functions: tuple["Statistical_Functions"],
         depth:int,
-        prefix: str,
         to_train=True,
     ) -> da.Array:
 
@@ -559,12 +551,6 @@ class Object_Classifier:
 
         check_folder_argument(self.output_folder)
 
-        if not isinstance(prefix, str):
-            raise TypeError("The argument [prefix] has the wrong data type. Please pass a str")
-
-        if prefix.isspace() or prefix=="":
-            raise InvalidPrefixError("The argumnt [prefix] is empty or contains only whitespace. Please pass a valid prefix for a file")
-
         if np.unique(annotation.compute()).size<3:
             raise InvalidAnnotationsArray("Annotations must contain more than 3 unique values")
 
@@ -579,10 +565,14 @@ class Object_Classifier:
 
         if to_train:
             logger.info("OBJECT CLASSIFICATION: starting training")
-            self.object_training(X_train, annotation, prefix)
+            self.object_training(X_train, annotation)
 
         logger.info("OBJECT CLASSIFICATION: starting classification")
-        clf:RandomForestClassifier = joblib.load(os.path.join(self.output_folder, f"{prefix}_{self.MODEL_NAME}"))
+        model_path = os.path.join(self.output_folder, self.MODEL_NAME)
+
+        if not os.path.isfile(model_path):
+            raise NoModelFound("No model is found please make or train on.")
+        clf:RandomForestClassifier = joblib.load(model_path)
         y_pred_all = self.object_classification(features.drop( [self.ID_COLUMN_NAME], axis=1 ), clf)
 
         cell_ids=features[self.ID_COLUMN_NAME]
@@ -606,9 +596,8 @@ class Object_Classifier:
         images: list[da.Array] | list[np.ndarray] | list[xa.DataArray],
         annotation: da.Array | np.ndarray | xa.DataArray,
         statistical_functions: tuple["Statistical_Functions"],
-        prefix: str,
     ) -> da.Array:
-        return self.object_classifier_workflow(mask, images, annotation, statistical_functions, prefix)
+        return self.object_classifier_workflow(mask, images, annotation, statistical_functions)
 
 
 class Statistical_Functions(StrEnum):
